@@ -1,0 +1,5 @@
+{
+    "primaryFilterClassNameMap": {
+        "open": "Espo\\Custom\\Classes\\Select\\GeneralCasesObj\\PrimaryFilters\\Open"
+    }
+}

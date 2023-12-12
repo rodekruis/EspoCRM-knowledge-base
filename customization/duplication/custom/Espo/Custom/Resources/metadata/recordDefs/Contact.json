@@ -1,0 +1,3 @@
+{
+    "duplicateWhereBuilderClassName": "Espo\\Custom\\Classes\\DuplicateWhereBuilders\\Contact"
+}
