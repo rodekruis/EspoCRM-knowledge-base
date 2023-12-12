@@ -1,4 +1,4 @@
-# Duplicate checking for custom fields.
+# Field validaiton with regex
 EspoCRM v7 and up
 
 To enable regex field validation on specific fields. This is best illustrated with an example. In this example we will validate the **phoneNumber** of the **Contact** entity.
