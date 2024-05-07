@@ -1,5 +1,5 @@
 id,name,description,targetType,data,isActive,eventStartIdList,eventStartAllIdList,createdAt,modifiedAt,assignedUserId,assignedUserName,createdById,createdByName,modifiedById,modifiedByName
-662a49a7e4cb51fc5,"Data retention - 2 weeks -  DehCase","'- Removes all cases which are older than 2 weeks. 
+662a49a7e4cb51fc5,"Data retention - 365 days -  DehCase","'- Removes all cases which are older than 365 days. 
 - Runs periodically (every XXX hours/weeks)
 - Best practice is to enable this setting as well: Administration -> Settings -> Clean up deleted records = true/checked. If not, records will stay in the database with the column 'deleted' on 'true' and are therefore only soft-deleted.
 - Best practice is to also remove related flowchart process records to save space for relevant data.
