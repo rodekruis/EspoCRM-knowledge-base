@@ -56,6 +56,19 @@ Create `custom/Espo/Custom/Resources/metadata/clientDefs/GeneralCases.json`:
 
 If this file already exists, find `"filterlist"` and change that part accordingly.
 
+> [!IMPORTANT]
+> Do you want the filter to be selected by default? Add also this to the same file (`...clientDefs/GeneralCases.json`)
+> ```json
+> {
+>    "defaultFilterData": {
+>        "primary": "open"
+>    },
+>    "selectDefaultFilters": {
+>        "filter": "open"
+>    }
+>}
+>```
+
 ## Step 3: Create the class
 
 Create a class for your entity.
@@ -96,4 +109,5 @@ $ sudo chown -R www-data:www-data Custom
 
 
 ## Step 5: Clear Cache
+
 Clear cache: Administration > Clear Cache
