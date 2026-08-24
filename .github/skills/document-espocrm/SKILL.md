@@ -169,6 +169,14 @@ Produce the document with these sections in this order (journeys, customizations
 
 **The document ends there. No appendix.** Do not add a methodology section, a command log, a list of the SQL you ran, or raw entity/role/automation dumps — and do not smuggle the same material into the body as inline commands or source citations, which is noisier still. A wall of `docker exec` incantations pads the document and invites someone to paste them without understanding them. Write findings, not evidence.
 
+**State each finding once, in the section that owns it; reference it everywhere else.** These sections overlap by design — §2 walks through a flow, §9.3 grades security, §10 reconciles — so the same fact will legitimately come up three or four times. What must *not* repeat is the supporting evidence. Write it out where the finding lives, and elsewhere give the claim plus a pointer (`see §6.1`). Left unchecked this is the single biggest source of bloat: a first draft here restated the headline dormancy evidence four times, the report-filter pattern five times, and ran to 10 % more lines than needed. Concretely:
+
+- **§10 reconciles, it does not re-argue.** Each row is *claim → verdict → pointer*, not a repeat of the evidence chain.
+- **Never run parallel "open questions" and "recommended actions" lists** — they cover the same ground in two grammatical moods and force the reader to map one onto the other. Use a single prioritized table: question, and the action that follows once it is answered.
+- **Security findings live in §9.3** with severities; §10 links to them rather than restating them.
+- **Journeys describe the flow.** Field counts, metadata sizes and dashboard inventories belong to §3, §6 and §8.
+- **Don't use a table for two rows,** or a row per item where a sentence carries the same content — prefer a banded summary ("73–85 %: …, 22–31 %: …") over a row per entity when the exact figure is not the point.
+
 Illustrative snippets (top-level fences, not nested inside a wrapper):
 
 A journey diagram:
