@@ -75,6 +75,18 @@ Use the **cheapest correct source** for each item. **SQL** for everything that l
   - Cascading select handlers in `client/custom/src/handlers/select-related/*.js` → [Customization wiki → Cascading Select](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization#cascading-select-with-automatic-filters)
   - Custom scheduled-job classes in `Custom/Jobs/*.php` registered via `metadata/app/scheduledJobs.json` (the scheduled instance is a `scheduled_job` DB row — see 1.7)
   - Anything not in the catalog → document it as a **bespoke/undocumented customization** and flag it in Phase 2.
+
+  **Route your findings to one section only — this step feeds three of them.** The `custom/` tree is the source for the data model, the code inventory *and* the automations, so decide where each thing lands and write it there once:
+
+  | What you found | Goes in |
+  |---|---|
+  | `entityDefs`, `scopes` — fields, links, entity settings | **§3 Data model** |
+  | `formula/`, `logicDefs/` — before-save scripts, dynamic logic | **§6 Automations** |
+  | `Classes/`, `Hooks/`, `Jobs/`, `Services/`, `client/custom/src/` — actual code | **§5 Customizations** |
+  | `recordDefs`, `selectDefs`, `aclDefs`, `layouts` — wiring and behaviour config | **§5 Customizations** |
+  | Catalog classification (catalog vs bespoke) | **§5 Customizations** |
+
+  Never write a §5 row whose content is "see §6" — omit the row instead.
 - [ ] **1.7 Automations** (Advanced Pack / BPM — skip cleanly if not installed). 510 convention: **always use flowcharts, not workflows** — so lead with BPMN and, if any workflows exist, flag them as legacy/migration candidates in Phase 2.
   - **BPMN flowcharts** (the 510 default) — `bpmn_flowchart`: `name`, `target_type`, `is_active`, `description`, and the `data` JSON (a `list` of nodes — `eventStart*`, `task`, `gateway*`, `eventEnd` — and `flow` edges with `startId`/`endId`). Reconstruct a **mermaid flowchart** from that graph and summarize each task's `actionList` (e.g. `createNotification`, `updateEntity`, `updateProcessEntity`, `sendEmail`). Note linked Reports (`targetReportId`) and any timer `scheduling` cron. Every run writes a `bpmn_process` (+ `bpmn_flow_node`) row, so well-built flows delete their own process in a final step — note whether they do (disk hygiene per Best practices).
   - **Workflows** (discouraged) — `workflow` table: `name`, `entity_type`, trigger `type` (`afterRecordCreated`/`afterRecordUpdated`/`afterRecordSaved`/`scheduled`/`manual`), `is_active`, conditions, actions. If present, document them **and** flag for possible migration to a flowchart.
@@ -144,7 +156,11 @@ Produce the document with these sections in this order (journeys, customizations
 - **2. High-level user journeys** — the centerpiece. Per journey: **actor/role**, trigger, ordered steps, entities touched, automations involved, end state — plus a mermaid `flowchart` diagram. Base these on the user interview, corrected by what you found.
 - **3. Data model** — prioritized entity list (purpose, key fields, custom-or-core), custom fields per entity, and a mermaid `erDiagram` built from the `links`.
 - **4. Roles & access control** — a role-by-scope table (create/read/edit/delete/stream at yes/all/team/own/no), field-level restrictions, special permissions, teams, and user-type counts. Portal roles separately if any.
-- **5. Customizations** — backend (PHP classes, metadata), frontend (`client/custom` JS), layouts, dynamic logic, formulas — each labeled *catalog* (linked) or *bespoke*.
+- **5. Customizations** — Code and classification only. Bespoke PHP (`Classes/`, `Hooks/`, `Jobs/`, `Services/`), bespoke frontend (`client/custom/src/` field views and select handlers), the wiring that changes behaviour (`recordDefs`, `selectDefs`, `aclDefs`, notable `layouts`), and the **510 catalog mapping table** — each item labeled *catalog* (linked) or *bespoke*.
+  - **Do not restate the data model here** (`entityDefs`, `scopes`) — §3 owns fields, links and entity settings.
+  - **Do not describe formulas or dynamic logic here** — §6 owns behaviour. A row reading "before-save scripts — see §6.5" is worse than no row: delete it.
+  - **Do not pad with a file-count inventory.** Counting `i18n/` files or `layouts/` is not a finding. The valuable content is usually *negative* — "no bespoke PHP", "no duplicate-checking configured", "`selectDefs` are extension-generated report filters, not hand-written `PrimaryFilters`" — because it tells a new developer there is no code to read.
+  - **If there is no bespoke code at all, this section is three or four lines**: the verdict, the zero-counts for `Classes|Hooks|Jobs|Services` and `client/custom/src/`, and the catalog table. Resist expanding it to justify the heading.
 - **6. Automations** — BPMN flowcharts first (reconstructed diagrams + action summaries), then any workflows (flagged as legacy), scheduled jobs (DB row + custom `Jobs/` class), reports, and formula scripts. Note trigger, condition, effect, and active/inactive. **Workflow figures here are hand-built workflows only** — extension-generated `is_internal = 1` rows are excluded silently and are never referenced (see 1.7).
 - **7. Templates & notifications** — email/PDF templates, notification rules, stream settings (and whether stream is needlessly on for bulk-imported entities).
 - **8. Integrations & API access** — API users and what their roles *actually* grant, email accounts, webhooks, portals, external systems, and **dashboard Iframe embeds with their URLs** (no secrets). Call out anonymous/publish-to-web embeds explicitly.
