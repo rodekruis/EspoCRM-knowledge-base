@@ -48,8 +48,21 @@ Use the **cheapest correct source** for each item. **SQL** for everything that l
 - [ ] **1.1 Instance profile** — from `data/config.php`: `siteUrl`, `timeZone`, `language`, `defaultCurrency`, `authenticationMethod`, `applicationName`, `customPrefixDisabled`, `tabList` (which entities are on the navbar = what matters). **The installed `version` is *not* in `config.php` on 10.x — read `data/state.php`**, which also gives `latestVersion` and `latestExtensionVersions` (i.e. how far behind the instance is — worth reporting). Redact credentials.
 - [ ] **1.2 Extensions / packs** — `extension` table: `name`, `version`, `is_installed`. Confirms Advanced Pack / BPM / Sales Pack presence.
 - [ ] **1.3 Data model** — read **custom entities** straight from `custom/Espo/Custom/Resources/metadata/` (`scopes/*.json` for which are entities, `entityDefs/*.json` for `fields` and `links`); for a wholly-custom entity this JSON is the complete definition. Identify **native entities actually in use** from `tabList` (1.1) + a per-entity DB record count (`SELECT COUNT(*) ... WHERE deleted=0`) + the links pointing at them from custom entities — document those, don't dump every stock scope. Use the metadata cache/API only to get the merged field list of a *customized native* entity. Build a prioritized entity list (custom, on-navbar, data-holding, referenced by roles/automations). Custom entities/fields may carry a `c`/`C` prefix (e.g. `cPersonAffected`) unless `customPrefixDisabled` is set in config.
-- [ ] **1.4 Custom fields** — from `custom/.../entityDefs/<Entity>.json`: list fields with type, options (enums), `required`, `readOnly`, `audited`, `isPersonalData`, tooltip. For a custom entity every field is here; for a customized native entity these are the added/overridden fields (`isCustom: true`). Flag **PII** (entity type `Person` and/or fields with the personal-data flag) and, per 510 convention, note any field **not** `audited`. Note calculated/formula fields, including `notStorable` runtime fields (a SQL `select` expression, computed on display — these have no physical DB column).
-- [ ] **1.5 Roles & access control** — `role`, `role_user`, `role_team`, `team`, `team_user`, `user`. Decode `role.data` (per-scope create/read/edit/delete/stream at level yes/all/team/own/no) and `role.field_data` (field-level read/edit) into readable tables. Note special permissions (assignment, export, mass-update, data-privacy, etc.), portal roles, and user types (admin/regular/api/portal) with active counts. Capture 510-relevant security controls: field-level **Read = no on `User`** (prevents users disabling their own 2FA), how PII fields are gated per role (e.g. hidden from call-center agents, restricted for API users like PowerBI), and any external/510 admin or API accounts and what they can reach.
+- [ ] **1.4 Custom fields** — from `custom/.../entityDefs/<Entity>.json`: list fields with type, options (enums), `required`, `readOnly`, `audited`, `isPersonalData`, tooltip. For a custom entity every field is here; for a customized native entity these are the added/overridden fields (`isCustom: true`). Note calculated/formula fields, including `notStorable` runtime fields (a SQL `select` expression, computed on display — these have no physical DB column); if there are **none**, say so, because it means every derived value is materialized and depends on the automation layer actually running (see 1.10).
+  - **Establish first whether the instance holds PII at all** — don't assume it does. Check for `Person`-type scopes, fields flagged `isPersonalData`, and whether native `Contact`/`Lead` hold real rows. Some instances (statistical / geospatial / reference-data tools) legitimately hold **none**. If so, record that as a finding *with evidence* and treat the PII controls in 1.5 and §9 as **N/A**, not as failures. If PII *is* present, do the full inventory and gating analysis.
+  - **Produce an audit-coverage table, not a prose remark.** "Some fields aren't audited" is unactionable; a ranked table is. For every entity emit `audited / total` and a percentage, sorted worst-first — bulk-imported measurement entities are usually the worst and matter least, so let the reader judge:
+    ```bash
+    sudo docker exec espocrm php -r '
+    $d="/var/www/html/custom/Espo/Custom/Resources/metadata/entityDefs/";
+    foreach(glob($d."*.json") as $f){
+      $e=basename($f,".json"); $j=json_decode(file_get_contents($f),true);
+      $fl=$j["fields"]??[]; $a=0; foreach($fl as $x){ if(!empty($x["audited"])) $a++; }
+      printf("%-26s %4d fields %4d audited %3d%%\n",$e,count($fl),$a,count($fl)?round(100*$a/count($fl)):0);
+    }'
+    ```
+- [ ] **1.5 Roles & access control** — `role`, `role_user`, `role_team`, `team`, `team_user`, `user`. Decode `role.data` (per-scope create/read/edit/delete/stream at level yes/all/team/own/no) and `role.field_data` (field-level read/edit) into readable tables. Note special permissions (assignment, export, mass-update, data-privacy, etc.), portal roles, and user types (admin/regular/api/portal) with active counts. Capture 510-relevant security controls: field-level **Read = no on `User`** (prevents users disabling their own 2FA), how PII fields are gated per role *if the instance holds PII at all* (see 1.4 — e.g. hidden from call-center agents, restricted for API users like PowerBI), and any external/510 admin or API accounts and what they can reach.
+  - `role.field_data` is usually a map of scopes to **empty objects** `{}` — UI placeholders, not restrictions. Report only the non-empty entries, and state plainly if there are effectively none.
+  - Cross-check every user against roles **and** teams. Watch for **active accounts with no role** (default-deny → they can log in and see nothing) and **API users with `read/edit = all`** where `team` was intended — a reporting integration with cross-tenant *write* access is a real finding.
 - [ ] **1.6 Customizations (code-level)** — enumerate `custom/Espo/Custom/Resources/metadata/` (`entityDefs`, `clientDefs`, `selectDefs`, `recordDefs`, `scopes`, `layouts`, `formula`, `i18n`, `hooks`, `app/scheduledJobs.json`), `custom/Espo/Custom/Classes/*.php`, `custom/Espo/Custom/Jobs/*.php`, `custom/Espo/Custom/Hooks/*.php`, plus `client/custom/` (field views under `src/views/`, select handlers under `src/handlers/`). This same tree is the source for the custom data model (1.3–1.4); here, classify each entry as a *new custom entity/field* (the norm) vs a *change to a native entity* (the exception worth calling out), then map it to the [Customization wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization) and the **510 customization catalog** and link to it:
   - Duplicate-check `WhereBuilder` classes + `recordDefs` → [duplication/dupecheck.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/duplication/dupecheck.md)
   - Primary/global filters in `Classes/Select/**/PrimaryFilters` + `selectDefs`/`clientDefs` → [globalFilters/globalFilter.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/globalFilters/globalFilter.md)
@@ -71,9 +84,30 @@ Use the **cheapest correct source** for each item. **SQL** for everything that l
     Also note the legitimate reason a hand-built workflow may exist alongside BPM: EspoCRM has no BPMN start event for "user ticks a checkbox / presses a button", so an `afterRecordUpdated` workflow whose only actions are `startBpmnProcess` is a **launcher**, not business logic. Judge workflows by what is *in* them — a launcher is fine, an `executeFormula` full of scoring logic is the thing to flag.
   - **Scheduled jobs** — `scheduled_job` DB rows (`name`, `job`, `scheduling` cron, `status`); custom job classes live in `custom/Espo/Custom/Jobs/*.php`, registered in `custom/.../metadata/app/scheduledJobs.json`. Cross-link the two.
   - **Reports** — `report`: `name`, `entity_type`, `type` (List/Grid), `columns`, and `filters`/`filtersDataList` (e.g. `olderThanXDays`). Reports often feed retention flowcharts and selection logic (e.g. inactive-user deactivation).
+    > **Watch for reports used as calculation infrastructure, not reporting.** A common Advanced Pack pattern is the **report filter as a named query fragment inside Formula** — `entity\sumRelated('adm3', 'pop', 'reportFilter67beb60ca60f08945')`. When you see hundreds of machine-named reports (`1.1 not empty`, `32 0.5`, `ADM2 312`) they are almost certainly load-bearing scoring arguments, not dashboards. Document the pattern explicitly and warn that deleting a report filter silently corrupts a formula — there is no referential integrity and no human-readable indirection. Count them: `SELECT COUNT(*) FROM report_filter WHERE deleted=0;`
+  - **Dashboards & embeds** — `dashboard_template.layout` (shared dashboards) and `preferences.data` (per-user dashlet options; note `preferences` has only `id` + `data` columns). Extract **Iframe dashlet URLs** — these are frequently the instance's actual product surface (Power BI, Grafana, a map). Flag Power BI **"publish to web"** links (`app.powerbi.com/view?r=…`): they are **anonymously readable by anyone with the link** and bypass every role you documented in 1.5.
   - **Formula & dynamic logic** — entity `formula` (before-save scripts) in metadata, and `clientDefs.<Entity>.dynamicLogic` (conditional visible/required/read-only).
-- [ ] **1.8 Templates & notifications** — `email_template`, `template` (PDF), notification/stream settings.
-- [ ] **1.9 Integrations & API users** — `user` rows with `type='api'`, inbound/outbound email accounts, external integrations (describe purpose; **redact** any keys).
+- [ ] **1.8 Templates & notifications** — `email_template`, `template` (PDF), notification/stream settings. Check `scopes/*.json` for `"stream": true` on **high-volume bulk-imported entities** — stream notes on a table of a hundred thousand imported statistical rows are pure noise and a needless write amplifier; worth recommending it be turned off.
+- [ ] **1.9 Integrations & API users** — `user` rows with `type='api'`, inbound/outbound email accounts, external integrations, webhooks, portals, and the **Iframe dashlet embeds** found in 1.7 (describe purpose; **redact** any keys). For each API user, state plainly what its role actually grants — `read = all` on a tenant-partitioned instance defeats the team model regardless of the user's team memberships.
+- [ ] **1.10 Liveness — is this thing actually running?** *(Do not skip. This is often the single most valuable finding in the whole document, and nothing else in this procedure will surface it.)* A structurally complete instance that nobody has used in a year needs a very different handover than a live one, and it changes whether every security finding is urgent or moot. Establish and report:
+  - **Data freshness** — `SELECT MAX(modified_at) FROM <each business table>;` per prioritized entity.
+  - **Has the automation layer ever executed?** — `SELECT COUNT(*) FROM bpmn_process;` and `bpmn_flow_node` (count **all** rows, not `deleted=0` — soft-deleted processes still leave rows, so a true `0` means it has *never* run), plus `SELECT COUNT(*) FROM workflow_log_record;`.
+  - **Are the automations even switched on?** — `SELECT COUNT(*) FROM bpmn_flowchart WHERE deleted=0 AND is_active=1;`. All-inactive flowcharts alongside active launcher workflows is a contradiction worth escalating immediately.
+  - **Cron health & failures** — `SELECT status, COUNT(*), MAX(execute_time) FROM job GROUP BY status;` then list the `Failed` rows (verify columns first — there is **no** `job.message` column in 10.x).
+  - **Who still logs in** — `SELECT created_at, username, is_denied FROM auth_log_record ORDER BY created_at DESC LIMIT 10;`. Admin-only logins for months = dormant.
+  If the evidence says dormant, **lead the document with it** (a callout under the metadata block) rather than burying it in the consistency check — everything downstream should be read in that light.
+- [ ] **1.11 Orphans — what exists in one place but not the other.** Cheap, generic, high-yield. Diff the layers against each other and report anything that only exists on one side:
+  - **Tables with no metadata** — compare `SHOW TABLES` against `custom/.../metadata/scopes/*.json`. Deleted entities leave their tables behind, sometimes with tens of thousands of rows that are invisible in the UI, unmanaged, and undeletable through the admin. Count the rows so the reader can judge (`SELECT COUNT(*) FROM <orphan_table>;`) — this is a data-protection question as much as a tidiness one.
+  - **Roles granting access to scopes that no longer exist** — keys in `role.data` / `role.field_data` with no matching scope. These are dead permissions users may still be assigned.
+  - **Orphan metadata files** — `metadata/formula/*.json`, `logicDefs/`, `layouts/` for entities that have no `scopes/` entry.
+  - **Entities defined but not on the navbar** (`tabList`) and holding no data — scratch/`CTest`-style leftovers.
+- [ ] **1.12 Security posture of the instance itself.** Golden rule 6 governs *your* handling of secrets; this step assesses *the instance*. Read non-secret keys from `data/config.php` and report deviations against the [Security wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security), each with a severity:
+  - `siteUrl` — **is it `https` with a real DNS name?** Plain HTTP on a bare IP means passwords, session tokens and every API payload cross the network unencrypted. High severity, easy to miss because it looks like a harmless config value.
+  - `auth2FA` / `auth2FAForced` — enabled? How many `admin`-type accounts are exposed if not?
+  - `authTokenLifetime` (`0` = tokens never expire) and `authTokenMaxIdleTime`.
+  - `recordListMaxSizeLimit` raised far above the default 200 (usually for API/BI pulls) — note it and why.
+  - **Stray config backups in the web-served data dir** — `ls /var/www/html/data/` and flag anything like `config.php.bak-*`. These contain the DB password, `passwordSalt`, `cryptKey` and API secrets. Report the filename and the risk; **never open or quote the contents**.
+  - Version currency from 1.1 (`version` vs `latestVersion`, extension vs `latestExtensionVersions`).
 
 ### Phase 2 — Cross-check & reconcile (the part that adds trust)
 
@@ -100,17 +134,17 @@ Present a short summary plus the file, invite corrections, iterate, and save the
 
 Produce the document with these sections in this order (journeys, customizations, automations, roles are the headline items the user cares about; the data model is supporting context). Omit a section only if it genuinely doesn't apply, and say so.
 
-- **Title + metadata block** — instance name/URL, EspoCRM version + edition, DB engine/version, date generated, "generated by" note, and the **sources used** (existing docs? user interview? live introspection?).
+- **Title + metadata block** — instance name/URL, EspoCRM version + edition, DB engine/version, date generated, "generated by" note, and the **sources used** (existing docs? user interview? live introspection?). **If 1.10 found the instance dormant or the automation layer non-functional, put that as a callout immediately under this block** — it reframes everything below it.
 - **1. Overview** — what the instance is for, primary teams/stakeholders, installed extensions/packs. One paragraph plus a bullet list.
 - **2. High-level user journeys** — the centerpiece. Per journey: **actor/role**, trigger, ordered steps, entities touched, automations involved, end state — plus a mermaid `flowchart` diagram. Base these on the user interview, corrected by what you found.
 - **3. Data model** — prioritized entity list (purpose, key fields, custom-or-core), custom fields per entity, and a mermaid `erDiagram` built from the `links`.
 - **4. Roles & access control** — a role-by-scope table (create/read/edit/delete/stream at yes/all/team/own/no), field-level restrictions, special permissions, teams, and user-type counts. Portal roles separately if any.
 - **5. Customizations** — backend (PHP classes, metadata), frontend (`client/custom` JS), layouts, dynamic logic, formulas — each labeled *catalog* (linked) or *bespoke*.
 - **6. Automations** — BPMN flowcharts first (reconstructed diagrams + action summaries), then any workflows (flagged as legacy), scheduled jobs (DB row + custom `Jobs/` class), reports, and formula scripts. Note trigger, condition, effect, and active/inactive.
-- **7. Templates & notifications** — email/PDF templates, notification rules.
-- **8. Integrations & API access** — API users and their roles, email accounts, external systems (no secrets).
-- **9. Data protection & retention** — PII inventory (`Person` entities + personal-data fields), how roles gate PII, retention flowcharts, data-privacy erasure, and cleanup settings (`cleanupDeletedRecordsPeriod`, process-record deletion).
-- **10. Consistency check & open questions** — the Phase 2 buckets: confirmed / inconsistencies (flagged) / gaps, deviations from the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices), plus unresolved open questions and recommendations.
+- **7. Templates & notifications** — email/PDF templates, notification rules, stream settings (and whether stream is needlessly on for bulk-imported entities).
+- **8. Integrations & API access** — API users and what their roles *actually* grant, email accounts, webhooks, portals, external systems, and **dashboard Iframe embeds with their URLs** (no secrets). Call out anonymous/publish-to-web embeds explicitly.
+- **9. Data protection & retention** — **start by stating whether the instance holds PII at all, with evidence** (`Person`-type scopes, `isPersonalData` fields, whether native `Contact`/`Lead` hold rows). If it does: PII inventory, how roles gate it, retention flowcharts, data-privacy erasure. If it does **not**: say so plainly, note that the corresponding controls are N/A rather than missing, and cover what personal data *does* exist (staff accounts in `user`). Either way include cleanup settings (`cleanupDeletedRecordsPeriod`, process-record deletion) and a **security-posture table from 1.12** with severities.
+- **10. Consistency check & open questions** — the Phase 2 buckets: confirmed / inconsistencies (flagged) / gaps, deviations from the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices), plus unresolved open questions and recommendations. Include the **orphans from 1.11** (with row counts) under gaps, and end with a **prioritized** next-steps list — ordered by risk, with the blocking question first.
 - **Appendix** — sources consulted and the exact commands/queries used (so the doc is reproducible); optionally raw entity/role/automation dumps.
 
 Illustrative snippets (top-level fences, not nested inside a wrapper):
@@ -200,10 +234,46 @@ SELECT name, data, field_data FROM role WHERE deleted = 0;
 SELECT user_name, type, is_active FROM user WHERE deleted = 0;
 SELECT name, version, is_installed FROM extension;
 SELECT name, target_type, is_active FROM bpmn_flowchart WHERE deleted = 0;      -- BPM (510 default)
-SELECT name, entity_type, type, is_active FROM workflow WHERE deleted = 0;      -- Advanced Pack (legacy)
+SELECT name, entity_type, type, is_active FROM workflow
+  WHERE deleted = 0 AND is_internal = 0;                                        -- hand-built only (see 1.7)
 SELECT name, job, scheduling, status FROM scheduled_job WHERE deleted = 0;
 SELECT COUNT(*) FROM <entity_table> WHERE deleted = 0;                          -- usage signal
 ```
+
+Liveness (1.10) — run these on every engagement:
+
+```sql
+SELECT MAX(modified_at) FROM <entity_table>;                       -- data freshness
+SELECT COUNT(*) FROM bpmn_process;                                 -- 0 = BPM has NEVER run
+SELECT COUNT(*) FROM bpmn_flow_node;
+SELECT COUNT(*) FROM workflow_log_record;
+SELECT COUNT(*) FROM bpmn_flowchart WHERE deleted=0 AND is_active=1;
+SELECT status, COUNT(*), MAX(execute_time) FROM job GROUP BY status;
+SELECT name, execute_time, attempts FROM job WHERE status='Failed' ORDER BY execute_time DESC;
+SELECT created_at, username, is_denied FROM auth_log_record ORDER BY created_at DESC LIMIT 10;
+```
+
+**Query economically — aggregate before you list.** `report`, `workflow`, `bpmn_flowchart`, `preferences` and `dashboard_template` hold large JSON blobs; a naive `SELECT *` returns tens of KB, gets truncated, and costs you turns re-querying. Rules:
+
+- `COUNT(*) … GROUP BY` first to size the problem, *then* list rows if the count justifies it.
+- Truncate blob columns: `SELECT name, LEFT(actions, 300) FROM workflow …`.
+- Use `\G` for wide rows, and pipe long output to a file (`> /tmp/x.txt`) then `grep`/parse it rather than printing it.
+- Never `SELECT *` on `report`, `workflow`, `bpmn_flowchart`, `preferences`, `dashboard_template`.
+- Parse JSON columns (`role.data`, `bpmn_flowchart.data`, `dashboard_template.layout`) with `python3`/`jq` rather than eyeballing them.
+
+**Verify columns with `DESCRIBE` \u2014 these do *not* exist in 10.x** and will each cost you a failed query: `user.last_access`, `job.message`, `user_data.two_factor_auth`, `preferences.dashlets_options` (the `preferences` table has only `id` and `data`).
+
+Orphan detection (1.11):
+
+```bash
+# tables whose entity no longer exists in metadata
+comm -23 \
+  <(q "SHOW TABLES;" | tail -n +2 | grep '^c_' | sort) \
+  <(sudo docker exec espocrm sh -c 'ls /var/www/html/custom/Espo/Custom/Resources/metadata/scopes/' \
+    | sed 's/\.json$//' | sed -E 's/([a-z0-9])([A-Z])/\1_\2/g' | tr 'A-Z' 'a-z' | sort)
+```
+
+Verify each candidate by hand (the camelCase→snake_case mapping is lossy for names like `CADM0` → `c_a_d_m0`), then count rows in the confirmed orphans.
 
 Code-level customizations from the filesystem:
 
