@@ -147,6 +147,24 @@ Fill the standard format below. Use mermaid for journey flows, the data-model di
 
 Present a short summary plus the file, invite corrections, iterate, and save the `.md` to the agreed path.
 
+## Language and tone
+
+**Write for a reader who does not speak English as a first language, and who may not be technical — even if their job title says "administrator".** Follow [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org/) in spirit. This is not a style preference; a handover document that the recipient cannot read has failed at its only job.
+
+- **Short sentences.** One idea per sentence. Aim for under 20 words. Break a long sentence into two.
+- **Active voice, present tense.** "The workflow starts the flowchart", not "the flowchart is started by the workflow".
+- **One word, one meaning, every time.** Pick a term and never vary it for elegance. If you write "record type" once, do not later write "entity", "object" or "scope" for the same thing. Varying vocabulary is good literary style and bad technical writing.
+- **Explain the jargon you cannot avoid, once, in plain words.** "A flowchart is a set of steps that the system follows by itself." Then use the term consistently. Prefer the words the reader sees in the interface over the words in the database.
+- **No metaphors, idioms or figures of speech.** These do not survive translation. Ban: *heavy lifting, load-bearing, under the hood, out of the box, moot, drown in, the tell, plumbing, papers over, earns its place, at a glance, cell for cell.*
+- **No buzzwords or vague praise.** Ban: *robust, seamless, leverage, holistic, granular, best-in-class, powerful, rich, comprehensive.* If a thing is good, say what it does.
+- **Prefer the short common word.** *use* not *utilise*; *change* not *modify*; *start* not *initiate*; *show* not *surface*; *about* not *approximately*; *needs* not *requires*; *end* not *terminate*.
+- **Spell out what a finding means for the reader.** Not "no `duplicateWhereBuilderClassNameMap` is configured", but "the system does not look for duplicates. If you import the same file twice, you get every record twice, and nothing warns you."
+- **Keep raw identifiers, but do not build sentences from them.** `CADM1` and `authTokenLifetime` are what the reader will search for, so keep them in tables and in code marks. Do not write prose like "`role.field_data` is a map of scopes to empty objects".
+- **Say who does what.** "A person with the `Country Admin` role can…", not "the Country Admin scope permits…".
+- **Number and order anything the reader must act on**, most important first, and say plainly when you need an answer from them.
+
+Apply this to the whole document, including table cells, diagram labels and callouts. A mermaid label reading `p1r / p2r / p3r -> CDecisionTree.score<p1><p2><p3>` tells the reader nothing; `The three pillar scores are looked up in the decision tree` tells them everything they need.
+
 ## Standard documentation format
 
 Produce the document with these sections in this order (journeys, customizations, automations, roles are the headline items the user cares about; the data model is supporting context). Omit a section only if it genuinely doesn't apply, and say so.
