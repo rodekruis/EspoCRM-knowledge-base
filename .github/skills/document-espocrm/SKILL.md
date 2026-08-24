@@ -1,0 +1,205 @@
+---
+name: document-espocrm
+description: 'Produce comprehensive Markdown documentation for a running EspoCRM instance from inside its VM (full database + filesystem + admin API access). Use when the user wants to document, describe, produce an overview of, audit, hand over, or onboard someone to an EspoCRM instance — covering high-level user journeys, the data model (entities, custom fields, relationships), roles & access control, customizations (backend PHP + client JS + metadata), and automations (Workflows, BPMN flowcharts, scheduled jobs, formulas, reports). Ingests any pre-existing documentation first, interviews the user for the intended user journeys, cross-checks them against what the system actually contains, and flags inconsistencies. Outputs a single copy-pasteable Markdown file.'
+argument-hint: 'Instance name/URL and output path for the .md — optional'
+---
+
+# Document an EspoCRM instance
+
+Generates a single, self-contained Markdown document that describes a live EspoCRM instance well enough to hand it to a new developer, administrator, or auditor. This skill is meant to be **run from inside the VM where EspoCRM runs**, so you have full read access to the **database** and the **filesystem** (`custom/`, `client/custom/`, `data/config.php`), plus the **admin API** as a fallback.
+
+You (the agent) **can run the VM/SSH/`docker`/`mysql`/filesystem commands yourself**. What you **cannot** do are **Azure portal actions** and **browser/admin-UI actions** — for anything that needs a logged-in browser (e.g. eyeballing a layout, confirming a flow visually), ask the user. Your job is to **introspect what you can, ask the user for what only they know, reconcile the two, and write it up**.
+
+The two things below are **inputs from the user, never assumptions** — collect them before you start introspecting:
+
+1. **Any pre-existing documentation, in any format** (wiki, Word/PDF, Confluence, diagrams, spreadsheets, a README, screenshots, tickets). This is the **first input** — ask for it up front and use it as the skeleton and as a set of claims to verify.
+2. **The user's own outline of the major user journeys / flows.** Ask them to describe, in their words, who does what and to what end. This is the ground truth for *intent*; the system tells you the *mechanics*. You will cross-check one against the other and **flag every inconsistency**.
+
+## Golden rules
+
+1. **Ask first, assume never — for the two inputs above.** Do not fabricate user journeys from the schema, and do not skip asking for existing docs. Start Phase 0 by requesting both.
+2. **The live system is the source of truth for structure.** Don't infer customizations, roles, or automations from this knowledge base or from memory — read them from the running instance. **Discover the schema before querying it** (`SHOW TABLES`, `DESCRIBE <table>`) because table/column names vary by EspoCRM version and by which extensions (Advanced Pack / BPM / Sales Pack) are installed.
+3. **Read-only, always.** This is a documentation task. Never modify the instance: no writes, no `rebuild`, no record edits, no config changes. Use `SELECT`/`SHOW`/`DESCRIBE` and `GET`-only API calls.
+4. **Cross-check and reconcile — then flag, don't paper over.** Compare the user's narrative and any existing docs against what the system actually contains. Surface contradictions and gaps explicitly, both in a dedicated section of the document and back to the user.
+5. **Document what is used and customized, not every core default.** Prioritize custom entities/fields, entities on the navbar (`tabList`), entities that hold real data, and anything referenced by a role or an automation. Don't dump all ~100 stock scopes.
+6. **Never leak secrets — on the page or in the shell.** `config.php`/`config-internal.php` hold DB credentials, `passwordSalt`, `cryptKey`, `apiSecretKeys`, SMTP passwords, etc. Never copy passwords, tokens, secret keys, or hashes into the output document. Also keep DB passwords out of shell history — never pass them as `-p<pass>` arguments ([Security wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#usage-of-sensitive-credentials)). Read the password from config into a shell variable and pass it via the `MYSQL_PWD` environment variable.
+7. **Make it reproducible and verifiable.** Record the exact commands/queries you used in an appendix and cite record counts and sources, so the document can be regenerated and trusted rather than believed.
+8. **Follow the 510 way of working.** The [wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki) is the source of truth for how 510 builds EspoCRM — [Best practices](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices), [Customization](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization), [Security](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security). Expect these conventions, and where one is broken, flag it in Phase 2: new custom entities instead of customizing native ones; **flowcharts, not workflows**; all fields audited; PII on `Person`-type entities with the personal-data flag set; `lowerCamelCase` names and singular entity names.
+
+## Procedure
+
+Work through the phases below and track them with a todo list. Phase 0 is a hard gate — do not begin introspection until you have asked for the two user inputs.
+
+### Phase 0 — Gather inputs & scope (ask the user; do this first)
+
+Ask the user, and wait for answers before introspecting:
+
+- [ ] **Existing documentation?** "Is there *any* existing documentation of this instance, in any format? If so, please share or point me to it." Ingest whatever comes back; treat it as the draft skeleton **and** as claims to verify against the system.
+- [ ] **Major user journeys?** "In your own words, what are the main things people use this CRM for — who does what, in what order, to achieve what outcome?" Record this **verbatim**; it is the intent you will cross-check.
+- [ ] **Scope & audience.** Who is the doc for (new dev / admin handover / audit)? That sets the depth.
+- [ ] **Access.** Confirm you can reach the DB and the app filesystem (`custom/` and `client/custom/`, plus `data/cache/` if a merged metadata view is ever needed). The DB is either a **bundled container** (name varies — `espocrm-db` or `espocrm-mysql`; discover with `docker ps`) or an **external host** (often Azure Database for MySQL); DB creds are in `data/config.php` or `data/config-internal.php` (external DBs also reference an `sslCA`). An **admin/read-only API key** is optional — only a last-resort fallback for reading effective metadata when the on-disk cache is unavailable.
+- [ ] **Edition/extensions.** Community vs Advanced Pack / BPM / Sales Pack — this determines whether Workflows, BPMN flowcharts, and Reports exist. (You'll confirm from the `extension` table in Phase 1.)
+- [ ] **Output location** for the `.md` file.
+
+### Phase 1 — Introspect the live instance (read-only)
+
+Use the **cheapest correct source** for each item. **SQL** for everything that lives in the database — roles, users, teams, workflows, BPMN, reports, scheduled jobs, templates, extensions, record counts; it is the fastest and most direct. **The filesystem — `custom/Espo/Custom/` and `client/custom/` — for structure and customizations.** 510's convention is to **rarely customize native EspoCRM entities and instead build new custom entities**, so a custom entity's *entire* definition (fields, enum options, links, layouts, dynamic logic, formula, labels) lives in `custom/` — reading it directly is the simplest and effectively complete source, no cache or API needed. Reach for the compiled **metadata cache** (or **Metadata API** as a further fallback) only for the exception: a *native* entity that has been customized, where `custom/` holds just the delta and you need the merged core+custom field list. Note that `information_schema`/`DESCRIBE` exposes physical columns but *not* field types, enum options, link semantics, labels, or dynamic logic, so it is not a substitute for metadata. Discover schema before you query. See the *Extraction reference* at the end for concrete commands.
+
+- [ ] **1.1 Instance profile** — from `data/config.php`: `version`, `siteUrl`, `timeZone`, `language`, `defaultCurrency`, `authenticationMethod`, `tabList` (which entities are on the navbar = what matters). Redact credentials.
+- [ ] **1.2 Extensions / packs** — `extension` table: `name`, `version`, `is_installed`. Confirms Advanced Pack / BPM / Sales Pack presence.
+- [ ] **1.3 Data model** — read **custom entities** straight from `custom/Espo/Custom/Resources/metadata/` (`scopes/*.json` for which are entities, `entityDefs/*.json` for `fields` and `links`); for a wholly-custom entity this JSON is the complete definition. Identify **native entities actually in use** from `tabList` (1.1) + a per-entity DB record count (`SELECT COUNT(*) ... WHERE deleted=0`) + the links pointing at them from custom entities — document those, don't dump every stock scope. Use the metadata cache/API only to get the merged field list of a *customized native* entity. Build a prioritized entity list (custom, on-navbar, data-holding, referenced by roles/automations). Custom entities/fields may carry a `c`/`C` prefix (e.g. `cPersonAffected`) unless `customPrefixDisabled` is set in config.
+- [ ] **1.4 Custom fields** — from `custom/.../entityDefs/<Entity>.json`: list fields with type, options (enums), `required`, `readOnly`, `audited`, `isPersonalData`, tooltip. For a custom entity every field is here; for a customized native entity these are the added/overridden fields (`isCustom: true`). Flag **PII** (entity type `Person` and/or fields with the personal-data flag) and, per 510 convention, note any field **not** `audited`. Note calculated/formula fields, including `notStorable` runtime fields (a SQL `select` expression, computed on display — these have no physical DB column).
+- [ ] **1.5 Roles & access control** — `role`, `role_user`, `role_team`, `team`, `team_user`, `user`. Decode `role.data` (per-scope create/read/edit/delete/stream at level yes/all/team/own/no) and `role.field_data` (field-level read/edit) into readable tables. Note special permissions (assignment, export, mass-update, data-privacy, etc.), portal roles, and user types (admin/regular/api/portal) with active counts. Capture 510-relevant security controls: field-level **Read = no on `User`** (prevents users disabling their own 2FA), how PII fields are gated per role (e.g. hidden from call-center agents, restricted for API users like PowerBI), and any external/510 admin or API accounts and what they can reach.
+- [ ] **1.6 Customizations (code-level)** — enumerate `custom/Espo/Custom/Resources/metadata/` (`entityDefs`, `clientDefs`, `selectDefs`, `recordDefs`, `scopes`, `layouts`, `formula`, `i18n`, `hooks`, `app/scheduledJobs.json`), `custom/Espo/Custom/Classes/*.php`, `custom/Espo/Custom/Jobs/*.php`, `custom/Espo/Custom/Hooks/*.php`, plus `client/custom/` (field views under `src/views/`, select handlers under `src/handlers/`). This same tree is the source for the custom data model (1.3–1.4); here, classify each entry as a *new custom entity/field* (the norm) vs a *change to a native entity* (the exception worth calling out), then map it to the [Customization wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization) and the **510 customization catalog** and link to it:
+  - Duplicate-check `WhereBuilder` classes + `recordDefs` → [duplication/dupecheck.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/duplication/dupecheck.md)
+  - Primary/global filters in `Classes/Select/**/PrimaryFilters` + `selectDefs`/`clientDefs` → [globalFilters/globalFilter.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/globalFilters/globalFilter.md)
+  - `client/custom/src/views/fields/*.js` field views (e.g. regex validation) → [fieldValidation/fieldValidation.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/fieldValidation/fieldValidation.md)
+  - `"isCustom": false` non-deletable entities/fields → [entities_nondeletable.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/entities_nondeletable.md)
+  - Conditional / cascading enum options in `clientDefs` → [conditionalOptions/README.md](https://github.com/rodekruis/EspoCRM-knowledge-base/blob/main/customization/conditionalOptions/README.md)
+  - Entity/metadata hooks in `Custom/Hooks/*.php` or `Resources/metadata/hooks/` → [Customization wiki → Using hooks](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization#using-hooks)
+  - Cascading select handlers in `client/custom/src/handlers/select-related/*.js` → [Customization wiki → Cascading Select](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization#cascading-select-with-automatic-filters)
+  - Custom scheduled-job classes in `Custom/Jobs/*.php` registered via `metadata/app/scheduledJobs.json` (the scheduled instance is a `scheduled_job` DB row — see 1.7)
+  - Anything not in the catalog → document it as a **bespoke/undocumented customization** and flag it in Phase 2.
+- [ ] **1.7 Automations** (Advanced Pack / BPM — skip cleanly if not installed). 510 convention: **always use flowcharts, not workflows** — so lead with BPMN and, if any workflows exist, flag them as legacy/migration candidates in Phase 2.
+  - **BPMN flowcharts** (the 510 default) — `bpmn_flowchart`: `name`, `target_type`, `is_active`, `description`, and the `data` JSON (a `list` of nodes — `eventStart*`, `task`, `gateway*`, `eventEnd` — and `flow` edges with `startId`/`endId`). Reconstruct a **mermaid flowchart** from that graph and summarize each task's `actionList` (e.g. `createNotification`, `updateEntity`, `updateProcessEntity`, `sendEmail`). Note linked Reports (`targetReportId`) and any timer `scheduling` cron. Every run writes a `bpmn_process` (+ `bpmn_flow_node`) row, so well-built flows delete their own process in a final step — note whether they do (disk hygiene per Best practices).
+  - **Workflows** (discouraged) — `workflow` table: `name`, `entity_type`, trigger `type` (`afterRecordCreated`/`afterRecordUpdated`/`afterRecordSaved`/`scheduled`/`manual`), `is_active`, conditions, actions. If present, document them **and** flag for possible migration to a flowchart.
+  - **Scheduled jobs** — `scheduled_job` DB rows (`name`, `job`, `scheduling` cron, `status`); custom job classes live in `custom/Espo/Custom/Jobs/*.php`, registered in `custom/.../metadata/app/scheduledJobs.json`. Cross-link the two.
+  - **Reports** — `report`: `name`, `entity_type`, `type` (List/Grid), `columns`, and `filters`/`filtersDataList` (e.g. `olderThanXDays`). Reports often feed retention flowcharts and selection logic (e.g. inactive-user deactivation).
+  - **Formula & dynamic logic** — entity `formula` (before-save scripts) in metadata, and `clientDefs.<Entity>.dynamicLogic` (conditional visible/required/read-only).
+- [ ] **1.8 Templates & notifications** — `email_template`, `template` (PDF), notification/stream settings.
+- [ ] **1.9 Integrations & API users** — `user` rows with `type='api'`, inbound/outbound email accounts, external integrations (describe purpose; **redact** any keys).
+
+### Phase 2 — Cross-check & reconcile (the part that adds trust)
+
+- [ ] Map **each user-described journey** onto the entities, roles, and automations found. For every step, confirm the system actually supports it (an entity exists, a role permits it, an automation fires).
+- [ ] Look the other way too: automations/entities/roles that carry real data or fire regularly but appear in **no** described journey — surface them as "present but unexplained".
+- [ ] Also check adherence to the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices) and flag deviations: workflows used where a flowchart is preferred, fields not audited, PII not flagged or not on a `Person` entity, the native `Contact` used instead of a custom entity, names not `lowerCamelCase`, or flowcharts that never delete their process records.
+- [ ] Sort findings into three buckets and put them in the document's *Consistency check* section:
+  - **Confirmed** — user narrative matches the system.
+  - **Inconsistencies** — the user said X but the system does Y (e.g. "assignment is automatic" but no workflow does it; a role is more permissive than described). **Flag each explicitly.**
+  - **Gaps** — described but not found, or found but undocumented/unexplained.
+- [ ] Bring the material inconsistencies back to the user to resolve before finalizing. Record anything unresolved as an **Open question** rather than guessing.
+
+### Phase 3 — Assemble the Markdown document
+
+Fill the standard format below. Use mermaid for journey flows, the data-model diagram, and BPMN reconstructions. Keep secrets out. Add the appendix (sources + exact commands) so it's reproducible.
+
+### Phase 4 — Review & handoff
+
+Present a short summary plus the file, invite corrections, iterate, and save the `.md` to the agreed path.
+
+## Standard documentation format
+
+Produce the document with these sections in this order (journeys, customizations, automations, roles are the headline items the user cares about; the data model is supporting context). Omit a section only if it genuinely doesn't apply, and say so.
+
+- **Title + metadata block** — instance name/URL, EspoCRM version + edition, DB engine/version, date generated, "generated by" note, and the **sources used** (existing docs? user interview? live introspection?).
+- **1. Overview** — what the instance is for, primary teams/stakeholders, installed extensions/packs. One paragraph plus a bullet list.
+- **2. High-level user journeys** — the centerpiece. Per journey: **actor/role**, trigger, ordered steps, entities touched, automations involved, end state — plus a mermaid `flowchart` diagram. Base these on the user interview, corrected by what you found.
+- **3. Data model** — prioritized entity list (purpose, key fields, custom-or-core), custom fields per entity, and a mermaid `erDiagram` built from the `links`.
+- **4. Roles & access control** — a role-by-scope table (create/read/edit/delete/stream at yes/all/team/own/no), field-level restrictions, special permissions, teams, and user-type counts. Portal roles separately if any.
+- **5. Customizations** — backend (PHP classes, metadata), frontend (`client/custom` JS), layouts, dynamic logic, formulas — each labeled *catalog* (linked) or *bespoke*.
+- **6. Automations** — BPMN flowcharts first (reconstructed diagrams + action summaries), then any workflows (flagged as legacy), scheduled jobs (DB row + custom `Jobs/` class), reports, and formula scripts. Note trigger, condition, effect, and active/inactive.
+- **7. Templates & notifications** — email/PDF templates, notification rules.
+- **8. Integrations & API access** — API users and their roles, email accounts, external systems (no secrets).
+- **9. Data protection & retention** — PII inventory (`Person` entities + personal-data fields), how roles gate PII, retention flowcharts, data-privacy erasure, and cleanup settings (`cleanupDeletedRecordsPeriod`, process-record deletion).
+- **10. Consistency check & open questions** — the Phase 2 buckets: confirmed / inconsistencies (flagged) / gaps, deviations from the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices), plus unresolved open questions and recommendations.
+- **Appendix** — sources consulted and the exact commands/queries used (so the doc is reproducible); optionally raw entity/role/automation dumps.
+
+Illustrative snippets (top-level fences, not nested inside a wrapper):
+
+A journey diagram:
+
+```mermaid
+flowchart LR
+  A[Beneficiary submits request] --> B{Intake role triages}
+  B -->|Accepted| C[Case created: DehCase]
+  B -->|Rejected| D[Case closed]
+  C --> E[Flowchart assigns to team]
+  E --> F[Caseworker handles]
+  F --> G[BPMN: 365-day retention deletes record]
+```
+
+A role table:
+
+| Scope | Create | Read | Edit | Delete | Stream |
+|-------|--------|------|------|--------|--------|
+| DehCase | yes | team | own | no | team |
+| Contact | yes | all | team | no | all |
+
+A BPMN reconstruction (from `bpmn_flowchart.data.list`): render `eventStart*`→`task`→`gateway*`→`eventEnd` as nodes and `flow` entries as edges, then list each task's actions beneath the diagram.
+
+## Extraction reference (read-only)
+
+Adjust container names/paths to the instance (this repo's setup uses a `docker` container named `espocrm` whose in-container app root is `/var/www/html`, a host wrapper at `/var/www/espocrm/`, and a bundled DB container — `espocrm-db` or `espocrm-mysql` — unless an external DB is configured). **Discover before you query; redact secrets; SELECT/SHOW/DESCRIBE only.**
+
+Instance profile — read specific keys only, never dump the whole file (it holds secrets):
+
+```bash
+sudo docker exec espocrm sh -c "grep -E \"'version'|'siteUrl'|'timeZone'|'language'|'authenticationMethod'|'tabList'\" /var/www/html/data/config.php"
+```
+
+Connect to the DB **without putting the password on the command line** (per the [Security wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#usage-of-sensitive-credentials) — `-p<pass>` leaks into shell history). Discover the container/host first; the name varies (`espocrm-db`/`espocrm-mysql`) and an external DB (Azure) is at the host in `config-internal.php`. Read the password from config into a shell variable and pass it through `MYSQL_PWD`; capture it with `$(...)` so it is never printed — don't run the read command on its own, that would echo the secret into the transcript. For an **external DB** run the client on the VM host; for the **bundled DB** run `mysql` inside the container via `sudo -E docker exec -e MYSQL_PWD` (name only), which passes the value by environment so it stays out of `argv`/history:
+
+```bash
+sudo docker ps --format '{{.Names}}'          # identify the DB container (espocrm-db/espocrm-mysql), or the external host from config-internal.php
+# read the DB password from config-internal.php (older instances: config.php) into a shell var, never printed:
+DBPW=$(sudo docker exec espocrm php -r '$c=include "/var/www/html/data/config-internal.php"; echo $c["database"]["password"] ?? "";')
+
+# External DB (Azure): run the client on the VM host — password via env, never -p
+MYSQL_PWD="$DBPW" mysql -h <host> -u <user> <dbname> -e "SHOW TABLES;"
+
+# Bundled DB: run mysql inside the container; `sudo -E` + `-e MYSQL_PWD` (name only) keeps the value out of argv
+export MYSQL_PWD="$DBPW"
+sudo -E docker exec -e MYSQL_PWD <db-container> mysql -u <user> <dbname> -e "SHOW TABLES;"
+unset MYSQL_PWD
+```
+
+For 510's custom entities, the full definition is right there in `custom/Espo/Custom/Resources/metadata/` (see the filesystem scan below) — read it directly and skip this step. You only need the **merged** effective metadata for a *customized native* entity (where `custom/` holds just the delta). That merged view is compiled from JSON on disk and cached — it is **not** in the database (`information_schema` exposes physical columns only). Read the compiled cache (fast, no auth):
+
+```bash
+# The cache path varies by version — locate it, then dump it as JSON:
+sudo docker exec espocrm sh -c 'find /var/www/html/data/cache -name "metadata*"'
+sudo docker exec espocrm sh -c \
+  'php -r "echo json_encode(include \"/var/www/html/data/cache/application/metadata.php\");"' | jq '.scopes'
+```
+
+Fall back to the admin API only if the cache is missing/stale or the filesystem isn't reachable — it always returns current merged metadata but needs an API key and the app serving HTTP:
+
+```bash
+curl -s -H "X-Api-Key: <ADMIN_OR_READONLY_API_KEY>" "<siteUrl>/api/v1/Metadata" | jq '.scopes'
+```
+
+If you ever list *records* via the API, note the default cap `recordListMaxSizeLimit` (200, no pagination) — prefer SQL `COUNT(*)` for totals.
+
+Discover schema, then query instance data (examples — verify column names with `DESCRIBE` first):
+
+```sql
+SHOW TABLES;
+DESCRIBE role;                     -- confirm data / field_data / *_permission columns
+SELECT name, data, field_data FROM role WHERE deleted = 0;
+SELECT user_name, type, is_active FROM user WHERE deleted = 0;
+SELECT name, version, is_installed FROM extension;
+SELECT name, target_type, is_active FROM bpmn_flowchart WHERE deleted = 0;      -- BPM (510 default)
+SELECT name, entity_type, type, is_active FROM workflow WHERE deleted = 0;      -- Advanced Pack (legacy)
+SELECT name, job, scheduling, status FROM scheduled_job WHERE deleted = 0;
+SELECT COUNT(*) FROM <entity_table> WHERE deleted = 0;                          -- usage signal
+```
+
+Code-level customizations from the filesystem:
+
+```bash
+sudo docker exec espocrm sh -c 'find /var/www/html/custom/Espo/Custom -type f | sort'
+sudo docker exec espocrm sh -c 'find /var/www/html/client/custom -type f | sort'
+```
+
+These two scans capture everything code-level — including `Custom/Jobs/`, `Custom/Hooks/`, `Resources/metadata/hooks/`, `Resources/metadata/app/scheduledJobs.json`, and `client/custom/src/handlers/`. Group the results by entity and customization type for section 5.
+
+Raw JSON under `custom/.../Resources/metadata/` is the **complete** definition for a wholly-custom entity, but only the **delta** for a customized native entity — so use `custom/` directly for the customizations inventory and custom data model (1.3–1.6), and fall back to the compiled cache/API above only to get a native entity's merged field list. The `/api/v1/OpenApi` endpoint (v9.3+, admin/API user) is a convenient bonus if you want an API view of the effective entity/field surface.
+
+## When unsure
+
+- **Prefer the official docs over guessing.** Data model & API: [Metadata API](https://docs.espocrm.com/development/api/metadata/), [API overview](https://docs.espocrm.com/development/api/), [Entity Manager](https://docs.espocrm.com/administration/entity-manager/). Access: [Roles management](https://docs.espocrm.com/administration/roles-management/). Automations: [Workflows](https://docs.espocrm.com/administration/workflows/), [BPM](https://docs.espocrm.com/administration/bpm/), [Formula](https://docs.espocrm.com/administration/formula/), [Dynamic Logic](https://docs.espocrm.com/administration/dynamic-logic/), [Reports](https://docs.espocrm.com/user-guide/reports/).
+- **For 510-specific conventions, consult the wiki** (not just EspoCRM docs): [Best practices](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices), [Customization](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Customization), [Security](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security), [Administration](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Administration).
+- **Schema/columns differ by version or edition** — trust `SHOW TABLES`/`DESCRIBE` and the Metadata API over any hardcoded name in this skill.
+- **Don't fabricate.** If something can't be determined from the system or the user, write "unknown / needs confirmation" and list it under Open questions rather than inventing it.
+- **When the system contradicts the user, the document must say so** — a flagged inconsistency is a more useful deliverable than a tidy but wrong narrative.
