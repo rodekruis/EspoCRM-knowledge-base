@@ -45,7 +45,7 @@ Ask the user, and wait for answers before introspecting:
 
 Use the **cheapest correct source** for each item. **SQL** for everything that lives in the database — roles, users, teams, workflows, BPMN, reports, scheduled jobs, templates, extensions, record counts; it is the fastest and most direct. **The filesystem — `custom/Espo/Custom/` and `client/custom/` — for structure and customizations.** 510's convention is to **rarely customize native EspoCRM entities and instead build new custom entities**, so a custom entity's *entire* definition (fields, enum options, links, layouts, dynamic logic, formula, labels) lives in `custom/` — reading it directly is the simplest and effectively complete source, no cache or API needed. Reach for the compiled **metadata cache** (or **Metadata API** as a further fallback) only for the exception: a *native* entity that has been customized, where `custom/` holds just the delta and you need the merged core+custom field list. Note that `information_schema`/`DESCRIBE` exposes physical columns but *not* field types, enum options, link semantics, labels, or dynamic logic, so it is not a substitute for metadata. Discover schema before you query. See the *Extraction reference* at the end for concrete commands.
 
-- [ ] **1.1 Instance profile** — from `data/config.php`: `version`, `siteUrl`, `timeZone`, `language`, `defaultCurrency`, `authenticationMethod`, `tabList` (which entities are on the navbar = what matters). Redact credentials.
+- [ ] **1.1 Instance profile** — from `data/config.php`: `siteUrl`, `timeZone`, `language`, `defaultCurrency`, `authenticationMethod`, `applicationName`, `customPrefixDisabled`, `tabList` (which entities are on the navbar = what matters). **The installed `version` is *not* in `config.php` on 10.x — read `data/state.php`**, which also gives `latestVersion` and `latestExtensionVersions` (i.e. how far behind the instance is — worth reporting). Redact credentials.
 - [ ] **1.2 Extensions / packs** — `extension` table: `name`, `version`, `is_installed`. Confirms Advanced Pack / BPM / Sales Pack presence.
 - [ ] **1.3 Data model** — read **custom entities** straight from `custom/Espo/Custom/Resources/metadata/` (`scopes/*.json` for which are entities, `entityDefs/*.json` for `fields` and `links`); for a wholly-custom entity this JSON is the complete definition. Identify **native entities actually in use** from `tabList` (1.1) + a per-entity DB record count (`SELECT COUNT(*) ... WHERE deleted=0`) + the links pointing at them from custom entities — document those, don't dump every stock scope. Use the metadata cache/API only to get the merged field list of a *customized native* entity. Build a prioritized entity list (custom, on-navbar, data-holding, referenced by roles/automations). Custom entities/fields may carry a `c`/`C` prefix (e.g. `cPersonAffected`) unless `customPrefixDisabled` is set in config.
 - [ ] **1.4 Custom fields** — from `custom/.../entityDefs/<Entity>.json`: list fields with type, options (enums), `required`, `readOnly`, `audited`, `isPersonalData`, tooltip. For a custom entity every field is here; for a customized native entity these are the added/overridden fields (`isCustom: true`). Flag **PII** (entity type `Person` and/or fields with the personal-data flag) and, per 510 convention, note any field **not** `audited`. Note calculated/formula fields, including `notStorable` runtime fields (a SQL `select` expression, computed on display — these have no physical DB column).
@@ -63,6 +63,12 @@ Use the **cheapest correct source** for each item. **SQL** for everything that l
 - [ ] **1.7 Automations** (Advanced Pack / BPM — skip cleanly if not installed). 510 convention: **always use flowcharts, not workflows** — so lead with BPMN and, if any workflows exist, flag them as legacy/migration candidates in Phase 2.
   - **BPMN flowcharts** (the 510 default) — `bpmn_flowchart`: `name`, `target_type`, `is_active`, `description`, and the `data` JSON (a `list` of nodes — `eventStart*`, `task`, `gateway*`, `eventEnd` — and `flow` edges with `startId`/`endId`). Reconstruct a **mermaid flowchart** from that graph and summarize each task's `actionList` (e.g. `createNotification`, `updateEntity`, `updateProcessEntity`, `sendEmail`). Note linked Reports (`targetReportId`) and any timer `scheduling` cron. Every run writes a `bpmn_process` (+ `bpmn_flow_node`) row, so well-built flows delete their own process in a final step — note whether they do (disk hygiene per Best practices).
   - **Workflows** (discouraged) — `workflow` table: `name`, `entity_type`, trigger `type` (`afterRecordCreated`/`afterRecordUpdated`/`afterRecordSaved`/`scheduled`/`manual`), `is_active`, conditions, actions. If present, document them **and** flag for possible migration to a flowchart.
+    > ⚠️ **Filter `is_internal = 0` before you count or judge anything.** Advanced Pack auto-creates one hidden `workflow` row per BPMN **Timer Start Event** (hook `custom/Espo/Modules/Advanced/Hooks/BpmnFlowchart/CreateWorkflows.php`). These have `name IS NULL`, `type = 'scheduled'`, `is_internal = 1`, a populated `flowchart_id`, and a single `startBpmnProcess` action. They are **extension internals, not developer-authored debt** — reporting them as "legacy workflows to migrate" is a serious false positive. Seen in the wild: 73 rows of which 67 were internal and only 6 hand-built.
+      ```sql
+      SELECT is_internal, is_active, COUNT(*) FROM workflow WHERE deleted=0 GROUP BY is_internal, is_active;
+      SELECT name, entity_type, type, is_active FROM workflow WHERE deleted=0 AND is_internal=0;
+      ```
+    Also note the legitimate reason a hand-built workflow may exist alongside BPM: EspoCRM has no BPMN start event for "user ticks a checkbox / presses a button", so an `afterRecordUpdated` workflow whose only actions are `startBpmnProcess` is a **launcher**, not business logic. Judge workflows by what is *in* them — a launcher is fine, an `executeFormula` full of scoring logic is the thing to flag.
   - **Scheduled jobs** — `scheduled_job` DB rows (`name`, `job`, `scheduling` cron, `status`); custom job classes live in `custom/Espo/Custom/Jobs/*.php`, registered in `custom/.../metadata/app/scheduledJobs.json`. Cross-link the two.
   - **Reports** — `report`: `name`, `entity_type`, `type` (List/Grid), `columns`, and `filters`/`filtersDataList` (e.g. `olderThanXDays`). Reports often feed retention flowcharts and selection logic (e.g. inactive-user deactivation).
   - **Formula & dynamic logic** — entity `formula` (before-save scripts) in metadata, and `clientDefs.<Entity>.dynamicLogic` (conditional visible/required/read-only).
@@ -73,7 +79,9 @@ Use the **cheapest correct source** for each item. **SQL** for everything that l
 
 - [ ] Map **each user-described journey** onto the entities, roles, and automations found. For every step, confirm the system actually supports it (an entity exists, a role permits it, an automation fires).
 - [ ] Look the other way too: automations/entities/roles that carry real data or fire regularly but appear in **no** described journey — surface them as "present but unexplained".
-- [ ] Also check adherence to the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices) and flag deviations: workflows used where a flowchart is preferred, fields not audited, PII not flagged or not on a `Person` entity, the native `Contact` used instead of a custom entity, names not `lowerCamelCase`, or flowcharts that never delete their process records.
+- [ ] Also check adherence to the [510 way of working](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Best-practices) and flag deviations: hand-built workflows (`is_internal = 0`) carrying business logic where a flowchart is preferred, fields not audited, PII not flagged or not on a `Person` entity, the native `Contact` used instead of a custom entity, names not `lowerCamelCase`, or flowcharts that never delete their process records.
+- [ ] **Lint names for consistency**, don't just check `lowerCamelCase` in the abstract — diff the actual field names for casing drift across an entity family. Real finds: `pCODE` next to `pcode`, `theme11ADM3` next to `theme11Adm2` next to `count11Adm3`, `uniqueID` next to `uniqueId`. Cheap to check, and it is a stated convention.
+- [ ] **Reconcile the intent of a deviation before reporting it.** A convention that is *not applicable* (e.g. "PII must be flagged" on an instance that stores only aggregate statistics) is a ✅ with evidence, not a ❌. Reporting inapplicable controls as failures destroys trust in the rest of the list.
 - [ ] Sort findings into three buckets and put them in the document's *Consistency check* section:
   - **Confirmed** — user narrative matches the system.
   - **Inconsistencies** — the user said X but the system does Y (e.g. "assignment is automatic" but no workflow does it; a role is more permissive than described). **Flag each explicitly.**
@@ -112,12 +120,14 @@ A journey diagram:
 ```mermaid
 flowchart LR
   A[Beneficiary submits request] --> B{Intake role triages}
-  B -->|Accepted| C[Case created: DehCase]
+  B -->|Accepted| C["Case created: DehCase"]
   B -->|Rejected| D[Case closed]
   C --> E[Flowchart assigns to team]
   E --> F[Caseworker handles]
-  F --> G[BPMN: 365-day retention deletes record]
+  F --> G["BPMN: 365-day retention deletes record"]
 ```
+
+**Quote any mermaid label containing `:` `(` `)` `,` or `#`** — unquoted they break the parser and the diagram silently fails to render in the delivered document. Entity names, cron expressions and BPMN start-event descriptions hit this constantly.
 
 A role table:
 
@@ -138,20 +148,30 @@ Instance profile — read specific keys only, never dump the whole file (it hold
 sudo docker exec espocrm sh -c "grep -E \"'version'|'siteUrl'|'timeZone'|'language'|'authenticationMethod'|'tabList'\" /var/www/html/data/config.php"
 ```
 
-Connect to the DB **without putting the password on the command line** (per the [Security wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#usage-of-sensitive-credentials) — `-p<pass>` leaks into shell history). Discover the container/host first; the name varies (`espocrm-db`/`espocrm-mysql`) and an external DB (Azure) is at the host in `config-internal.php`. Read the password from config into a shell variable and pass it through `MYSQL_PWD`; capture it with `$(...)` so it is never printed — don't run the read command on its own, that would echo the secret into the transcript. For an **external DB** run the client on the VM host; for the **bundled DB** run `mysql` inside the container via `sudo -E docker exec -e MYSQL_PWD` (name only), which passes the value by environment so it stays out of `argv`/history:
+Connect to the DB **without putting the password on the command line** (per the [Security wiki](https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#usage-of-sensitive-credentials) — `-p<pass>` leaks into shell history). Discover the container/host first; the name varies (`espocrm-db`/`espocrm-mysql`) and an external DB (Azure) is at the host in `config-internal.php`. Read the password from config into a shell variable and pass it through `MYSQL_PWD`; capture it with `$(...)` so it is never printed — don't run the read command on its own, that would echo the secret into the transcript.
+
+**Check which client binary exists.** Recent `mariadb:*` images have **dropped the `mysql` symlink** — `docker exec … mysql` fails with `exec: "mysql": executable file not found`. Use `mariadb` there and `mysql` on MySQL images. For an **external DB** run the client on the VM host; for the **bundled DB** run it inside the container via `sudo -E docker exec -e MYSQL_PWD` (name only), which passes the value by environment so it stays out of `argv`/history:
 
 ```bash
-sudo docker ps --format '{{.Names}}'          # identify the DB container (espocrm-db/espocrm-mysql), or the external host from config-internal.php
-# read the DB password from config-internal.php (older instances: config.php) into a shell var, never printed:
-DBPW=$(sudo docker exec espocrm php -r '$c=include "/var/www/html/data/config-internal.php"; echo $c["database"]["password"] ?? "";')
+sudo docker ps --format '{{.Names}}\t{{.Image}}'   # DB container name AND image (mariadb vs mysql -> which client binary)
 
-# External DB (Azure): run the client on the VM host — password via env, never -p
+# Define the password once and a helper, rather than re-reading config for every query:
+export MYSQL_PWD=$(sudo docker exec espocrm php -r \
+  '$c=include "/var/www/html/data/config-internal.php"; echo $c["database"]["password"] ?? "";')
+
+q(){ sudo -E docker exec -e MYSQL_PWD espocrm-db mariadb -u espocrm espocrm -e "$1" \
+     2>&1 | grep -v "Using a password"; }
+
+q "SHOW TABLES;"
+# ... all other queries via q "..." ...
+
+unset MYSQL_PWD     # ALWAYS clean up when you are done introspecting
+```
+
+For an **external DB (Azure)**, run the client on the VM host instead — same env-var approach, never `-p`:
+
+```bash
 MYSQL_PWD="$DBPW" mysql -h <host> -u <user> <dbname> -e "SHOW TABLES;"
-
-# Bundled DB: run mysql inside the container; `sudo -E` + `-e MYSQL_PWD` (name only) keeps the value out of argv
-export MYSQL_PWD="$DBPW"
-sudo -E docker exec -e MYSQL_PWD <db-container> mysql -u <user> <dbname> -e "SHOW TABLES;"
-unset MYSQL_PWD
 ```
 
 For 510's custom entities, the full definition is right there in `custom/Espo/Custom/Resources/metadata/` (see the filesystem scan below) — read it directly and skip this step. You only need the **merged** effective metadata for a *customized native* entity (where `custom/` holds just the delta). That merged view is compiled from JSON on disk and cached — it is **not** in the database (`information_schema` exposes physical columns only). Read the compiled cache (fast, no auth):
@@ -191,6 +211,16 @@ Code-level customizations from the filesystem:
 sudo docker exec espocrm sh -c 'find /var/www/html/custom/Espo/Custom -type f | sort'
 sudo docker exec espocrm sh -c 'find /var/www/html/client/custom -type f | sort'
 ```
+
+**Scope these scans precisely — `custom/` is two different things.**
+
+| Path | What it is | Treat as |
+|---|---|---|
+| `custom/Espo/Custom/` | *Your* customizations (Entity Manager output + hand-written PHP) | **The customizations inventory** |
+| `custom/Espo/Modules/<Ext>/` | **Installed extensions** (Advanced Pack etc.) — hundreds of files | **Not** a customization. Read it only to *explain* surprising DB rows |
+| `client/custom/modules/<ext>/` | The extension's client assets | Same — exclude from "bespoke frontend JS" |
+
+A bare `find /var/www/html/custom -type f` will drown you in extension code and make a no-code build look heavily customized. Conversely, reading the extension source is how you explain otherwise-baffling data — e.g. `Hooks/BpmnFlowchart/CreateWorkflows.php` is what proves those 67 unnamed workflows are generated, not authored.
 
 These two scans capture everything code-level — including `Custom/Jobs/`, `Custom/Hooks/`, `Resources/metadata/hooks/`, `Resources/metadata/app/scheduledJobs.json`, and `client/custom/src/handlers/`. Group the results by entity and customization type for section 5.
 
