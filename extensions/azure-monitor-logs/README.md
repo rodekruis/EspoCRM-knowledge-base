@@ -40,13 +40,6 @@ Each record becomes one `MessageData` envelope. In Application Insights it lands
 `channel`, `level`, `source` and `processId` are reserved: a log context key with one of
 those names is dropped in favour of the handler's own value.
 
-> **Why the file handler is re-declared:** setting `logger.handlerList` makes Espo stop
-> creating its default file handler. Espo's own `EspoRotatingFileHandlerLoader` hardcodes
-> `maxFiles = 0`, which would silently disable rotation pruning, so this extension ships
-> `RotatingFileHandlerLoader` that honours `logger.rotation`, `logger.maxFileNumber` and
-> `logger.printTrace`. The database handler is appended by `LogLoader` independently and
-> needs no entry.
-
 ---
 
 ## 1. Azure prerequisite
@@ -64,6 +57,15 @@ tagged `azure-monitor-logs-v<version>` and upload it in **Administration > Exten
 Releases are cut by [`.github/workflows/azure-monitor-logs.yml`](../../.github/workflows/azure-monitor-logs.yml)
 on every push to `main` touching this folder, but only when `manifest.json` carries a version
 that has no release yet. To build locally instead, run `.\build.ps1`.
+
+### New release
+
+Bump the version in **two** places, or CI fails, and push to `main`:
+
+| File | What to change |
+| --- | --- |
+| `manifest.json` | `"version": "0.3.0"` — this is what decides whether a release is cut |
+| `files/custom/Espo/Modules/AzureMonitorLogs/Log/AzureMonitorHandler.php` | `SDK_VERSION = 'php:espocrm-azure-monitor-logs:0.3.0'` |
 
 ---
 
