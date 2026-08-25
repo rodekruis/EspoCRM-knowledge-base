@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Espo\Modules\AzureMonitorLogs\Azure;
 
+use Espo\Core\Utils\Config;
+use Espo\Core\Utils\File\Manager as FileManager;
 use Throwable;
 
 /**
@@ -16,10 +18,16 @@ final class CircuitBreaker
 
     private ?int $openUntil = null;
     private bool $loaded = false;
+    private readonly FileManager $fileManager;
 
     public function __construct(
         private readonly Settings $settings,
-    ) {}
+        Config $config,
+    ) {
+        // Espo's FileManager applies defaultPermissions and chowns to the configured
+        // user/group, so state stays usable whether cron runs as root or the web user.
+        $this->fileManager = new FileManager($config->get('defaultPermissions'));
+    }
 
     public function isOpen(): bool
     {
@@ -42,8 +50,14 @@ final class CircuitBreaker
 
         $path = $this->getPath();
 
-        if ($path !== null && is_file($path)) {
-            @unlink($path);
+        if ($path === null || !is_file($path)) {
+            return;
+        }
+
+        try {
+            $this->fileManager->removeFile($path);
+        } catch (Throwable) {
+            // Best-effort.
         }
     }
 
@@ -122,31 +136,13 @@ final class CircuitBreaker
         }
 
         try {
-            $dir = dirname($path);
-
-            if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
-                return;
-            }
-
             $payload = json_encode($data);
 
             if ($payload === false) {
                 return;
             }
 
-            $temp = $path . '.' . bin2hex(random_bytes(8)) . '.tmp';
-            $handle = @fopen($temp, 'xb');
-
-            if ($handle === false) {
-                return;
-            }
-
-            $written = @fwrite($handle, $payload);
-            @fclose($handle);
-
-            if ($written === false || !@rename($temp, $path)) {
-                @unlink($temp);
-            }
+            $this->fileManager->putContents($path, $payload, LOCK_EX);
         } catch (Throwable) {
             // Best-effort: losing breaker state only costs one extra failed attempt.
         }

@@ -84,10 +84,16 @@ In `data/config-internal.php`:
 ],
 ```
 
-Then rebuild:
+Then rebuild: if EspoCRM is installed with Docker
 
 ```bash
 sudo docker exec espocrm php /var/www/html/rebuild.php
+```
+
+or if EspoCRM runs directly on the VM
+
+```bash
+sudo php /var/www/espocrm/rebuild.php   # your app root
 ```
 
 ### All parameters
@@ -115,8 +121,16 @@ sudo docker exec espocrm php /var/www/html/rebuild.php
 
 ## 4. Verify
 
+if EspoCRM is installed with Docker
+
 ```bash
 sudo docker exec espocrm php /var/www/html/command.php azure-monitor-logs-test
+```
+
+or if EspoCRM runs directly on the VM
+
+```bash
+sudo php /var/www/espocrm/command.php azure-monitor-logs-test   # your app root
 ```
 
 This runs two stages:
@@ -203,5 +217,9 @@ Config-only — no database schema is touched.
 - **Quota exhaustion** returns HTTP 402/439 and opens the breaker, so a blown daily cap
   degrades quietly rather than slowing every request.
 - **Resetting the breaker.** Delete `data/cache/azureMonitorLogs/`.
+- **Where extension errors surface.** Failures go to `error_log()`, never to Espo's logger.
+  In Docker that is the container's stderr (`docker logs espocrm`). On a VM it is the
+  PHP-FPM error log for web requests and the cron job's stderr for CLI runs — not
+  `data/logs/espo.log`.
 - **If local authentication is disabled** on the Application Insights resource (Entra-only
   ingestion), the endpoint returns 403 and this extension will not work as configured.
