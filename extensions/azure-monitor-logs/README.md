@@ -1,6 +1,6 @@
-# Azure Monitor Logs — EspoCRM extension
+# Azure Monitor Logs
 
-Ships EspoCRM log records to **Azure Application Insights** as `traces`, using the
+This EspoCRM extension sends log records to **Azure Application Insights** as `traces`, using the
 Application Insights ingestion ("track") API.
 
 - Registers a custom Monolog handler through `logger.handlerList`.
@@ -24,18 +24,21 @@ Espo\Core\Utils\Log (Monolog)
  └── DatabaseHandler                                    (added by Espo when logger.databaseHandler = true)
 ```
 
-Each record becomes one `MessageData` envelope. In Application Insights it lands in the
-`traces` table (`AppTraces` when queried from the Log Analytics workspace).
+Each record becomes one `MessageData` envelope. The same data has two different schemas
+depending on where you query it: the Application Insights resource's **Logs** blade uses the
+legacy camelCase names, the Log Analytics workspace uses the PascalCase ones.
 
-| Espo | Application Insights |
-| --- | --- |
-| message | `message` |
-| level | `severityLevel` (0 Verbose … 4 Critical) plus `customDimensions.level` |
-| channel | `customDimensions.channel` |
-| context keys | `customDimensions.*` (flattened, redacted) |
-| `roleName` | `cloud_RoleName` |
-| `roleInstance` | `cloud_RoleInstance` |
-| FPM vs cron | `customDimensions.source` = `web` / `cli` |
+| Espo | App Insights (`traces`) | Log Analytics (`AppTraces`) |
+| --- | --- | --- |
+| message | `message` | `Message` |
+| timestamp | `timestamp` | `TimeGenerated` |
+| level | `severityLevel` (0 Verbose … 4 Critical) | `SeverityLevel` |
+| level name | `customDimensions.level` | `Properties.level` |
+| channel | `customDimensions.channel` | `Properties.channel` |
+| context keys | `customDimensions.*` (flattened, redacted) | `Properties.*` |
+| `roleName` | `cloud_RoleName` | `AppRoleName` |
+| `roleInstance` | `cloud_RoleInstance` | `AppRoleInstance` |
+| FPM vs cron | `customDimensions.source` = `web` / `cli` | `Properties.source` |
 
 `channel`, `level`, `source` and `processId` are reserved: a log context key with one of
 those names is dropped in favour of the handler's own value.
@@ -84,7 +87,7 @@ In `data/config-internal.php`:
 Then rebuild:
 
 ```bash
-docker exec espocrm php /var/www/html/rebuild.php
+sudo docker exec espocrm php /var/www/html/rebuild.php
 ```
 
 ### All parameters
@@ -113,7 +116,7 @@ docker exec espocrm php /var/www/html/rebuild.php
 ## 4. Verify
 
 ```bash
-docker exec espocrm php /var/www/html/command.php azure-monitor-logs-test
+sudo docker exec espocrm php /var/www/html/command.php azure-monitor-logs-test
 ```
 
 This runs two stages:
@@ -126,8 +129,9 @@ This runs two stages:
    into `logger.handlerList` and that the buffer flushes on shutdown. It is sent when the
    command's process exits, so the command cannot report its result inline.
 
-Both markers share a random prefix. Query Application Insights > Logs (first telemetry can
-take a few minutes to appear):
+Both markers share a random prefix. First telemetry can take a few minutes to appear.
+
+From the **Application Insights** resource > Logs:
 
 ```kusto
 traces
@@ -135,15 +139,17 @@ traces
 | order by timestamp desc
 ```
 
+From the **Log Analytics workspace** > Logs, the same rows are in `AppTraces`:
+
+```kusto
+AppTraces
+| where Message startswith "AZMON-SMOKE-"
+| order by TimeGenerated desc
+```
+
 Expect **both** `-DIRECT` and `-LOGGER`. If only `-DIRECT` arrives, connectivity is fine but
 the handler is not registered in `logger.handlerList` — or `logger.level` excludes the level
 being emitted.
-
-Also confirm the local log still works:
-
-```bash
-docker exec espocrm tail -n 5 /var/www/html/data/logs/espo.log
-```
 
 ---
 
