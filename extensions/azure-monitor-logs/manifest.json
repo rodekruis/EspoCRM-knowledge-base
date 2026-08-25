@@ -1,0 +1,13 @@
+{
+    "name": "Azure Monitor Logs",
+    "version": "0.2.0",
+    "acceptableVersions": [
+        ">=8.1.0"
+    ],
+    "php": [
+        ">=8.1"
+    ],
+    "releaseDate": "2026-08-25",
+    "author": "510 - Netherlands Red Cross",
+    "description": "Ships EspoCRM log records to Azure Application Insights as traces, via the Application Insights ingestion API. Records are buffered per request and flushed in a single batched HTTPS POST on shutdown. Configured with a single connection string."
+}

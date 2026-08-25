@@ -1,0 +1,109 @@
+name: azure-monitor-logs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extensions/azure-monitor-logs/**'
+      - '.github/workflows/azure-monitor-logs.yml'
+  pull_request:
+    paths:
+      - 'extensions/azure-monitor-logs/**'
+      - '.github/workflows/azure-monitor-logs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: extensions/azure-monitor-logs
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read manifest
+        id: manifest
+        run: |
+          version=$(jq -re '.version' manifest.json)
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::manifest.json version '$version' is not semver"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=azure-monitor-logs-v$version" >> "$GITHUB_OUTPUT"
+          echo "zip=build/azure-monitor-logs-$version.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Lint PHP
+        run: |
+          php -v
+          find files scripts -name '*.php' -print0 | xargs -0 -n1 -P4 php -l
+
+      - name: Validate JSON
+        run: |
+          find . -name '*.json' -not -path './build/*' -print0 \
+            | xargs -0 -n1 jq -e . > /dev/null
+
+      - name: Check reported SDK version matches manifest
+        env:
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          handler=files/custom/Espo/Modules/AzureMonitorLogs/Log/AzureMonitorHandler.php
+          if ! grep -q "SDK_VERSION = 'php:espocrm-azure-monitor-logs:${VERSION}'" "$handler"; then
+            echo "::error file=extensions/azure-monitor-logs/$handler::SDK_VERSION does not match manifest.json version $VERSION"
+            exit 1
+          fi
+
+      - name: Build
+        run: pwsh ./build.ps1
+
+      - name: Verify archive
+        run: |
+          zip="${{ steps.manifest.outputs.zip }}"
+          unzip -Z1 "$zip"
+          # PHP's ZipArchive treats backslash entries as literal filenames.
+          if unzip -Z1 "$zip" | grep -q '\\'; then
+            echo "::error::archive contains backslash entry paths"
+            exit 1
+          fi
+          for required in manifest.json \
+                          files/custom/Espo/Modules/AzureMonitorLogs/Resources/module.json \
+                          scripts/AfterInstall.php; do
+            if ! unzip -Z1 "$zip" | grep -qx "$required"; then
+              echo "::error::archive is missing $required"
+              exit 1
+            fi
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azure-monitor-logs-${{ steps.manifest.outputs.version }}
+          path: extensions/azure-monitor-logs/${{ steps.manifest.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Publish release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.manifest.outputs.tag }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+          ZIP: ${{ steps.manifest.outputs.zip }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::notice::Release $TAG already exists. Bump version in manifest.json to publish a new one."
+            exit 0
+          fi
+
+          gh release create "$TAG" "$ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Azure Monitor Logs $VERSION" \
+            --notes "Install via Administration > Extensions in EspoCRM.
+
+          Built from ${GITHUB_SHA}." \
+            --target "$GITHUB_SHA"
