@@ -13,7 +13,7 @@ Application Insights ingestion ("track") API.
 
 The local file log (`data/logs/espo.log`) and the Admin > App Log keep working unchanged.
 
-## Architecture
+## Overview
 
 ```
 Espo\Core\Utils\Log (Monolog)
@@ -22,7 +22,7 @@ Espo\Core\Utils\Log (Monolog)
  └── DatabaseHandler                                    (added by Espo when logger.databaseHandler = true)
 ```
 
-Each record becomes one `MessageData` envelope. The same data has two different schemas
+Each EspoCRM log record becomes one `MessageData` envelope in Azure App Insights. The same data has two different schemas
 depending on where you query it: the Application Insights resource's **Logs** blade uses the
 legacy camelCase names, the Log Analytics workspace uses the PascalCase ones.
 
