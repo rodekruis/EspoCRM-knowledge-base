@@ -29,7 +29,7 @@ final class AzureMonitorHandler extends AbstractProcessingHandler
     private const MAX_REPORTED_ERRORS = 3;
 
     /** Keep in step with manifest.json on release. */
-    public const SDK_VERSION = 'php:espocrm-azure-monitor-logs:0.2.0';
+    public const SDK_VERSION = 'php:espocrm-azure-monitor-logs:0.3.0';
 
     /** Set by the handler itself; a context key of the same name is overwritten. */
     public const RESERVED_PROPERTIES = ['channel', 'level', 'source', 'processId'];
