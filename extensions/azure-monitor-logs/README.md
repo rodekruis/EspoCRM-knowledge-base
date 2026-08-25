@@ -13,9 +13,7 @@ Application Insights ingestion ("track") API.
 
 The local file log (`data/logs/espo.log`) and the Admin > App Log keep working unchanged.
 
----
-
-## How it fits together
+## Architecture
 
 ```
 Espo\Core\Utils\Log (Monolog)
@@ -43,14 +41,9 @@ legacy camelCase names, the Log Analytics workspace uses the PascalCase ones.
 `channel`, `level`, `source` and `processId` are reserved: a log context key with one of
 those names is dropped in favour of the handler's own value.
 
----
+## 1. Prerequisite
 
-## 1. Azure prerequisite
-
-One resource. In the portal, create a **workspace-based Application Insights** resource 
-and copy its **connection string** from the Overview blade.
-
----
+in Azure, an **Application Insights** resource, linked to a **Log Analytics Workspace**.
 
 ## 2. Install
 
@@ -74,7 +67,9 @@ Bump the version in **two** places, or CI fails, and push to `main`:
 
 ## 3. Configure
 
-In `data/config-internal.php`:
+Copy the **connection string** from **Application Insights > Overview**.
+
+Then, in `data/config-internal.php`:
 
 ```php
 'azureMonitorLogs' => [
@@ -117,9 +112,8 @@ sudo php /var/www/espocrm/rebuild.php   # your app root
 | `excludeSql` | `true` | Drop records flagged `isSql`. |
 | `cachePath` | `data/cache/azureMonitorLogs` | Circuit-breaker state directory. Setting it to `''` turns the breaker off entirely, so an Azure outage then costs a full timeout on every request that logs. |
 
----
 
-## 4. Verify
+## 4. Verify that it works
 
 if EspoCRM is installed with Docker
 
@@ -165,7 +159,6 @@ Expect **both** `-DIRECT` and `-LOGGER`. If only `-DIRECT` arrives, connectivity
 the handler is not registered in `logger.handlerList` — or `logger.level` excludes the level
 being emitted.
 
----
 
 ## 5. Rollback
 
@@ -178,7 +171,6 @@ Config-only — no database schema is touched.
   `azureMonitorLogs` block is left untouched — it becomes inert once the handler classes
   are gone, so a reinstall does not need the connection string pasted again.
 
----
 
 ### Security considerations
 
@@ -201,7 +193,6 @@ Config-only — no database schema is touched.
 5. **Log injection.** A user-controlled string (e.g. a login name) can contain newlines and
    text that mimics other log lines *inside* `message`. Structured fields cannot be spoofed.
 
----
 
 ## Operational notes
 
