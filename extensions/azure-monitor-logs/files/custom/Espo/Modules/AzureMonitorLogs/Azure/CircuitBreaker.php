@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace Espo\Modules\AzureMonitorLogs\Azure;
 
-use Espo\Core\Utils\Config;
 use Espo\Core\Utils\File\Manager as FileManager;
+use Espo\Core\Utils\Util;
 use Throwable;
 
 /**
@@ -18,16 +18,13 @@ final class CircuitBreaker
 
     private ?int $openUntil = null;
     private bool $loaded = false;
-    private readonly FileManager $fileManager;
 
     public function __construct(
         private readonly Settings $settings,
-        Config $config,
-    ) {
-        // Espo's FileManager applies defaultPermissions and chowns to the configured
-        // user/group, so state stays usable whether cron runs as root or the web user.
-        $this->fileManager = new FileManager($config->get('defaultPermissions'));
-    }
+        // Applies defaultPermissions and chowns, so state stays usable whether cron
+        // runs as root or as the web user.
+        private readonly FileManager $fileManager,
+    ) {}
 
     public function isOpen(): bool
     {
@@ -50,7 +47,7 @@ final class CircuitBreaker
 
         $path = $this->getPath();
 
-        if ($path === null || !is_file($path)) {
+        if ($path === null || !$this->fileManager->isFile($path)) {
             return;
         }
 
@@ -110,13 +107,12 @@ final class CircuitBreaker
     {
         $path = $this->getPath();
 
-        if ($path === null || !is_file($path) || is_link($path)) {
+        if ($path === null || !$this->fileManager->isFile($path) || is_link($path)) {
             return [];
         }
 
         try {
-            $raw = @file_get_contents($path);
-            $data = $raw === false ? null : json_decode($raw, true);
+            $data = json_decode($this->fileManager->getContents($path), true);
 
             return is_array($data) ? $data : [];
         } catch (Throwable) {
@@ -152,6 +148,6 @@ final class CircuitBreaker
     {
         $base = $this->settings->cachePath;
 
-        return $base === '' ? null : rtrim($base, '/\\') . '/' . self::FILENAME;
+        return $base === '' ? null : Util::concatPath($base, self::FILENAME);
     }
 }

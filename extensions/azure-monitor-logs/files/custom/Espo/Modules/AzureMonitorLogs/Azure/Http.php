@@ -7,8 +7,8 @@ namespace Espo\Modules\AzureMonitorLogs\Azure;
 /**
  * Thin cURL wrapper.
  *
- * Deliberately not Espo\Core\HttpClient, so that timeouts, protocol restrictions and
- * failure handling stay explicit and independent of Espo's version.
+ * Not Espo\Core\HttpClient: that exists only since Espo 10.0, while this extension
+ * supports 8.1+. It also throws on connect errors, which a log handler must not do.
  */
 final class Http
 {

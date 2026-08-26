@@ -11,6 +11,7 @@ use Espo\Modules\AzureMonitorLogs\Azure\Settings;
 use Monolog\Handler\AbstractProcessingHandler;
 use Monolog\Level;
 use Monolog\LogRecord;
+use Monolog\Processor\PsrLogMessageProcessor;
 use Throwable;
 
 /**
@@ -29,10 +30,16 @@ final class AzureMonitorHandler extends AbstractProcessingHandler
     private const MAX_REPORTED_ERRORS = 3;
 
     /** Keep in step with manifest.json on release. */
-    public const SDK_VERSION = 'php:espocrm-azure-monitor-logs:0.4.0';
+    public const SDK_VERSION = 'php:espocrm-azure-monitor-logs:0.4.1';
 
     /** Set by the handler itself; a context key of the same name is overwritten. */
     public const RESERVED_PROPERTIES = ['channel', 'level', 'source', 'processId'];
+
+    /**
+     * Espo interpolates `{placeholder}` only in its own file formatter and database
+     * handler, so records arrive here still carrying the raw message template.
+     */
+    private readonly PsrLogMessageProcessor $interpolator;
 
     public function __construct(
         private readonly IngestionClient $client,
@@ -42,6 +49,9 @@ final class AzureMonitorHandler extends AbstractProcessingHandler
         bool $bubble = true,
     ) {
         parent::__construct($level, $bubble);
+
+        // Context is left intact, so the values also stay in customDimensions.
+        $this->interpolator = new PsrLogMessageProcessor();
     }
 
     protected function write(LogRecord $record): void
@@ -90,7 +100,7 @@ final class AzureMonitorHandler extends AbstractProcessingHandler
      */
     private function toEnvelope(LogRecord $record): array
     {
-        $message = $record->message;
+        $message = ($this->interpolator)($record)->message;
 
         if (strlen($message) > $this->settings->maxMessageLength) {
             $message = substr($message, 0, $this->settings->maxMessageLength) . '...';

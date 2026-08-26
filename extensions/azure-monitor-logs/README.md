@@ -41,6 +41,11 @@ legacy camelCase names, the Log Analytics workspace uses the PascalCase ones.
 `channel`, `level`, `source` and `processId` are reserved: a log context key with one of
 those names is dropped in favour of the handler's own value.
 
+Espo logs PSR-3 style, e.g. `Before-save formula script failed. {message}` plus a context
+`message` key. The placeholders are substituted with Monolog's `PsrLogMessageProcessor`
+before sending, so `traces.message` reads as a complete sentence. The context keys stay in
+`customDimensions`.
+
 ## 1. Prerequisite
 
 in Azure, an **Application Insights** resource, linked to a **Log Analytics Workspace**.
