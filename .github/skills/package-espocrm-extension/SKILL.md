@@ -64,11 +64,25 @@ Prefer a distinctive module name for anything published widely: `client/custom/s
 4. **Validate — the step that matters.** Every prefixed client reference and every `jobClassName` in the package must resolve to a file the package ships. Fail the build otherwise; this is the only check that catches the silent breakage.
 5. **Test on a clean instance** — install, then exercise the specific behaviours that depend on supplemented files (the select filters, the scheduled job appearing in the dropdown). Installing without error proves nothing.
 
-A reference implementation of steps 2–4 lives in `extensions/feedback-management-template/build.py` (`sync`, then `build --zip <export.zip>`); it exits non-zero with the offending file and reference when validation fails.
+A reference implementation of steps 2–4 lives in `extensions/feedback-management-template/build.py` (`sync`, then `build --from-instance` or `--zip <export.zip>`); it exits non-zero with the offending file and reference when validation fails. `--from-instance` pulls the newest export out of the container — the UI stores every export as an Attachment with role `Export File`, so there is no need to download it from the browser and copy it back.
+
+## Decide who owns publishing
+
+Two shapes, and picking the wrong one creates two competing sources of truth for the same artifact.
+
+**The extension has its own repo** (the common case for anything published). That repo usually commits the package **unpacked** and has CI zip it. Then this build should write the unpacked tree over that repo's source directory, not emit a zip — the human step is to review the `git diff` and commit. Two rules make that safe:
+
+- **Scope deletions to the paths the export owns** — `manifest.json`, `files/custom/Espo/Modules/<Module>/`, `files/client/custom/src/`. Anything else in the tree is repo-owned and must survive a rebuild. A real example: `files/custom/Espo/Modules/.htaccess` sits *beside* the module directory, so a naive "replace the tree" wipes it.
+- **The repo, not the export, is the authority on `acceptableVersions`.** Carry the target manifest's value forward instead of taking the export's.
+
+**No separate repo** — emit a zip and attach it to a release. Name it after the extension, not the module: the module is often `Custom`, which makes a meaningless and collision-prone asset name.
+
+Whichever shape, run the reference validation in CI so a broken tree can never be published. Put it *first*, before any step that removes or commits an artifact, so a failure doesn't leave the repo without one.
 
 ## Gotchas
 
 - **Write zip entries with forward slashes.** PHP's `ZipArchive` on Linux extracts backslash separators as literal filenames, producing a flat directory of oddly-named files. Windows `Compress-Archive` gets this wrong.
-- **`acceptableVersions` is hardcoded `>=9.1.0`** regardless of the instance you exported from. A package built on v10 will happily install on 9.1 while possibly containing v10-only metadata keys. Adjust the manifest if you target older instances.
+- **`acceptableVersions` is hardcoded `>=9.1.0`** regardless of the instance you exported from. A package built on v10 will happily install on 9.1 while possibly containing v10-only metadata keys. Set the floor deliberately in the repo's manifest, and remember that raising it blocks every version below — including the one most of your users are probably on.
+- **The instance's version and the repo's published version drift apart.** `customExportManifest` is bumped on the instance every time someone exports, while releases are cut from the repo. Check both before a release and decide which is canonical, rather than assuming the export's number is right.
 - **Re-exporting overwrites nothing automatically** — the zip is stored as an Attachment (role `Export File`). Old versions accumulate; find them with `SELECT id, name FROM attachment WHERE role = 'Export File'`.
 - **Check the diff between releases**, not just the file count. The export regenerates every file, so a stray metadata change made while testing ends up in the published package.
