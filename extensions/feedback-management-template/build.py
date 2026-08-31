@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -79,6 +80,12 @@ def cmd_sync(args: argparse.Namespace) -> int:
             shutil.rmtree(target)
         target.mkdir(parents=True)
         run(docker + ["cp", f"{args.container}:/var/www/html/{remote}/.", str(target)])
+
+        if args.docker_sudo:
+            # docker cp runs as root here, so the copies land root-owned and git can
+            # no longer manage them. Hand them back to the invoking user.
+            run(["sudo", "-n", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(target)])
+
         count = sum(1 for p in target.rglob("*") if p.is_file())
         print(f"  sync  {remote} -> supplements/{local} ({count} files)")
 
