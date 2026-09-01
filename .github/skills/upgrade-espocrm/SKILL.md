@@ -99,7 +99,7 @@ It should report that the installation is already upgraded. If it reports a vers
 **Data + functional (diff vs Phase 0 baseline):**
 - [ ] Exact `COUNT(*)` (`deleted=0`) for key + custom entities **≥ baseline** (no data loss). Use `COUNT(*)`, not `information_schema.table_rows` (an estimate).
 - [ ] Extension rows unchanged and `is_installed=1`.
-- [ ] **Cron is executing, not merely enabled.** Read the `job` table's `Success` count twice a short interval apart and confirm it **increased**. `cronDisabled => false` records intent; a rising counter is the only proof the daemon is actually working through the queue.
+- [ ] **After maintenance mode is disabled and cron is re-enabled (see Delegate below), prove cron is executing:** Read the `job` table's `Success` count twice a short interval apart and confirm it **increased**. `cronDisabled => false` records intent; a rising counter is the only proof the daemon is actually working through the queue.
 - [ ] Authenticated API smoke test with a stored read-only API key: `GET /api/v1/<Entity>?maxSize=1` → `200` for a core entity **and** each custom entity/controller (proves ACL + record load, not just routing). If no such key exists on the instance, **say so explicitly and delegate the equivalent check to the user** — do not silently drop this item, and do not let the unauthenticated checks stand in for it.
 - [ ] **Canary flow**: touch a dedicated test record that fires a known Workflow/BPMN flow; assert its marker field updates within N seconds, and that the failed-flow-node count **did not increase** vs baseline (pre-existing failures are OK; *new* ones fail the upgrade).
 
