@@ -89,7 +89,7 @@ Run this whole phase again after **any** intermediate state change — a revert,
   ```
   sudo docker exec espocrm-db sh -c 'mariadb-upgrade --check-if-upgrade-is-needed -u root -p"$MARIADB_ROOT_PASSWORD"'
   ```
-  It should report that the installation is already upgraded. If it reports a version jump and "Check required!", take a backup and run `mariadb-upgrade`, then re-check. An absent `mysql_upgrade_info` in the data directory means it has never run.
+It should report that the installation is already upgraded. If it reports a version jump and "Check required!", take a backup and run `mariadb-upgrade`, then re-check. Do not infer upgrade state from an upgrade-info file; its name and presence vary by MariaDB version.
 - [ ] No *new* `ERROR|CRITICAL` in `sudo docker logs espocrm --tail 100` or in `data/espocrm/data/logs/` since the upgrade timestamp (watch especially for DB/migration errors when the DB is external).
 - [ ] `SELECT COUNT(*) FROM job WHERE status='Failed' AND modified_at > <upgrade_ts>` = 0.
 
