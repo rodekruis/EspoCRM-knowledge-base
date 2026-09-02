@@ -105,6 +105,7 @@ param(
 
     [string[]] $LogFilePatterns = @(
         '/var/www/espocrm/data/espocrm/data/logs/espo-*.log'
+        '/var/www/espocrm/data/espocrm/persistent/data/logs/espo-*.log'
     ),
 
     [string[]] $DiskCounterSpecifiers = @(
