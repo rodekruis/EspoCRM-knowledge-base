@@ -95,7 +95,8 @@ echo "==> Creating table ${TABLE_NAME}_CL in $WORKSPACE_NAME"
 # The first four columns are what the agent delivers; the rest are produced by the
 # transformation in the template, so the two have to stay in sync - same names, same
 # casing. TimeGenerated is mandatory.
-COLUMNS=(
+# Not named COLUMNS: bash overwrites that one with the terminal width.
+TABLE_COLUMNS=(
     TimeGenerated=datetime
     RawData=string
     Computer=string
@@ -123,7 +124,7 @@ az monitor log-analytics workspace table "$TABLE_VERB" \
     --name "${TABLE_NAME}_CL" \
     --retention-time "$RETENTION_DAYS" \
     --total-retention-time "$RETENTION_DAYS" \
-    --columns "${COLUMNS[@]}" \
+    --columns "${TABLE_COLUMNS[@]}" \
     --output none
 
 echo "==> Deploying the agent, the data collection rules and their associations"

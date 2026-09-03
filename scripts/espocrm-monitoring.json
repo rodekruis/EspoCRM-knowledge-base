@@ -1,0 +1,209 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "vmName": {
+      "type": "string",
+      "metadata": {
+        "description": "The VM running EspoCRM. Must be in this resource group."
+      }
+    },
+    "workspaceName": {
+      "type": "string",
+      "metadata": {
+        "description": "Log Analytics workspace, in this resource group."
+      }
+    },
+    "tableName": {
+      "type": "string",
+      "defaultValue": "espocrmlogs",
+      "metadata": {
+        "description": "Base name of the custom log table; _CL is appended."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Must match the workspace's region."
+      }
+    },
+    "logFilePatterns": {
+      "type": "array",
+      "defaultValue": [
+        "/var/www/espocrm/data/espocrm/data/logs/espo-*.log",
+        "/var/www/espocrm/data/espocrm/persistent/data/logs/espo-*.log"
+      ],
+      "metadata": {
+        "description": "Both known install layouts; a pattern matching nothing is ignored."
+      }
+    },
+    "diskCounterSpecifiers": {
+      "type": "array",
+      "defaultValue": [
+        "Logical Disk(*)\\% Used Space",
+        "Logical Disk(*)\\Free Megabytes"
+      ]
+    },
+    "agentTypeHandlerVersion": {
+      "type": "string",
+      "defaultValue": "1.0"
+    },
+    "logsDcrName": {
+      "type": "string",
+      "defaultValue": "espocrm-applogs-dcr"
+    },
+    "diskDcrName": {
+      "type": "string",
+      "defaultValue": "espocrm-disk-dcr"
+    }
+  },
+  "resources": [
+    {
+      "comments": "Azure Monitor Agent. Deploying it here rather than from the Portal's 'enable monitoring' blade is what avoids VMI-ActionGroup and the duplicate VM Availability alert.",
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "name": "[concat(parameters('vmName'), '/AzureMonitorLinuxAgent')]",
+      "apiVersion": "2024-07-01",
+      "location": "[parameters('location')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.Monitor",
+        "type": "AzureMonitorLinuxAgent",
+        "typeHandlerVersion": "[parameters('agentTypeHandlerVersion')]",
+        "autoUpgradeMinorVersion": true,
+        "enableAutomaticUpgrade": true
+      }
+    },
+    {
+      "comments": "EspoCRM application log files -> custom <tableName>_CL table.",
+      "type": "Microsoft.Insights/dataCollectionRules",
+      "name": "[parameters('logsDcrName')]",
+      "apiVersion": "2023-03-11",
+      "location": "[parameters('location')]",
+      "kind": "Linux",
+      "properties": {
+        "streamDeclarations": {
+          "Custom-Text-EspoLogs": {
+            "columns": [
+              {
+                "name": "TimeGenerated",
+                "type": "datetime"
+              },
+              {
+                "name": "RawData",
+                "type": "string"
+              },
+              {
+                "name": "Computer",
+                "type": "string"
+              },
+              {
+                "name": "FilePath",
+                "type": "string"
+              }
+            ]
+          }
+        },
+        "dataSources": {
+          "logFiles": [
+            {
+              "name": "Custom-Text-EspoLogs",
+              "streams": [
+                "Custom-Text-EspoLogs"
+              ],
+              "filePatterns": "[parameters('logFilePatterns')]",
+              "format": "text"
+            }
+          ]
+        },
+        "destinations": {
+          "logAnalytics": [
+            {
+              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+              "name": "lawDestination"
+            }
+          ]
+        },
+        "dataFlows": [
+          {
+            "streams": [
+              "Custom-Text-EspoLogs"
+            ],
+            "destinations": [
+              "lawDestination"
+            ],
+            "transformKql": "source\n| extend TimeStamp = todatetime(extract(@'^\\[([^\\]]+)\\]', 1, RawData))\n| extend Severity = extract(@'^\\[[^\\]]+\\]\\s+([A-Za-z]+):', 1, RawData)\n| extend Body = extract(@'^\\[[^\\]]+\\]\\s+[A-Za-z]+:\\s*(.*)$', 1, RawData)\n| extend ErrorCode = toint(extract(@'^\\((\\d+)\\)', 1, Body))\n| extend Message = extract(@'^(?:\\(\\d+\\)\\s*)?(.*)$', 1, Body)\n| project TimeGenerated, RawData, Computer, FilePath, TimeStamp, Severity, ErrorCode, Message",
+            "outputStream": "[concat('Custom-', parameters('tableName'), '_CL')]"
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Insights/dataCollectionRuleAssociations",
+      "name": "[concat(parameters('logsDcrName'), '-association')]",
+      "apiVersion": "2023-03-11",
+      "scope": "[concat('Microsoft.Compute/virtualMachines/', parameters('vmName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines/extensions', parameters('vmName'), 'AzureMonitorLinuxAgent')]",
+        "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('logsDcrName'))]"
+      ],
+      "properties": {
+        "dataCollectionRuleId": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('logsDcrName'))]",
+        "description": "Associates the application log DCR with the virtual machine."
+      }
+    },
+    {
+      "comments": "Disk performance counters -> built-in Perf table. No custom table, no transformation.",
+      "type": "Microsoft.Insights/dataCollectionRules",
+      "name": "[parameters('diskDcrName')]",
+      "apiVersion": "2023-03-11",
+      "location": "[parameters('location')]",
+      "kind": "Linux",
+      "properties": {
+        "dataSources": {
+          "performanceCounters": [
+            {
+              "name": "diskCounters",
+              "streams": [
+                "Microsoft-Perf"
+              ],
+              "samplingFrequencyInSeconds": 60,
+              "counterSpecifiers": "[parameters('diskCounterSpecifiers')]"
+            }
+          ]
+        },
+        "destinations": {
+          "logAnalytics": [
+            {
+              "workspaceResourceId": "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('workspaceName'))]",
+              "name": "lawDestination"
+            }
+          ]
+        },
+        "dataFlows": [
+          {
+            "streams": [
+              "Microsoft-Perf"
+            ],
+            "destinations": [
+              "lawDestination"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Insights/dataCollectionRuleAssociations",
+      "name": "[concat(parameters('diskDcrName'), '-association')]",
+      "apiVersion": "2023-03-11",
+      "scope": "[concat('Microsoft.Compute/virtualMachines/', parameters('vmName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines/extensions', parameters('vmName'), 'AzureMonitorLinuxAgent')]",
+        "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('diskDcrName'))]"
+      ],
+      "properties": {
+        "dataCollectionRuleId": "[resourceId('Microsoft.Insights/dataCollectionRules', parameters('diskDcrName'))]",
+        "description": "Associates the disk DCR with the virtual machine."
+      }
+    }
+  ]
+}
