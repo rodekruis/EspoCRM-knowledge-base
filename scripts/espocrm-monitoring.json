@@ -21,6 +21,13 @@
         "description": "Base name of the custom log table; _CL is appended."
       }
     },
+    "authTableName": {
+      "type": "string",
+      "defaultValue": "espocrmauthlogs",
+      "metadata": {
+        "description": "Base name of the custom authentication log table; _CL is appended."
+      }
+    },
     "location": {
       "type": "string",
       "defaultValue": "[resourceGroup().location]",
@@ -74,7 +81,7 @@
       }
     },
     {
-      "comments": "EspoCRM application log files -> custom <tableName>_CL table.",
+      "comments": "EspoCRM application log files -> custom <tableName>_CL table, and the same stream forked a second time into <authTableName>_CL keeping only the authentication lines.",
       "type": "Microsoft.Insights/dataCollectionRules",
       "name": "[parameters('logsDcrName')]",
       "apiVersion": "2023-03-11",
@@ -133,6 +140,16 @@
             ],
             "transformKql": "source\n| extend TimeStamp = todatetime(extract(@'^\\[([^\\]]+)\\]', 1, RawData))\n| extend Severity = extract(@'^\\[[^\\]]+\\]\\s+([A-Za-z]+):', 1, RawData)\n| extend Body = extract(@'^\\[[^\\]]+\\]\\s+[A-Za-z]+:\\s*(.*)$', 1, RawData)\n| extend ErrorCode = toint(extract(@'^\\((\\d+)\\)', 1, Body))\n| extend Message = extract(@'^(?:\\(\\d+\\)\\s*)?(.*)$', 1, Body)\n| project TimeGenerated, RawData, Computer, FilePath, TimeStamp, Severity, ErrorCode, Message",
             "outputStream": "[concat('Custom-', parameters('tableName'), '_CL')]"
+          },
+          {
+            "streams": [
+              "Custom-Text-EspoLogs"
+            ],
+            "destinations": [
+              "lawDestination"
+            ],
+            "transformKql": "source\n| extend TimeStamp = todatetime(extract(@\"^\\[([^\\]]+)\\]\", 1, RawData))\n| extend Severity = extract(@\"^\\[[^\\]]+\\]\\s+([A-Za-z]+):\", 1, RawData)\n| extend Message = extract(@\"^\\[[^\\]]+\\]\\s+[A-Za-z]+:\\s*(.*)$\", 1, RawData)\n| where Message startswith \"Password recovery:\" or Message startswith \"Auth:\"\n| extend EventType = iff(Message startswith \"Password recovery:\", \"PasswordRecovery\", \"Auth\")\n| extend Subject = iff(EventType == \"PasswordRecovery\", extract(@\"^Password recovery: (?:User|Denied for) ([^\\s,]+)\", 1, Message), extract(@\"'([^']+)'\", 1, Message))\n| extend Reason = case(Message contains \"already sent\", \"AlreadySent\", Message contains \"is not active\", \"InactiveUser\", Message contains \"another portal\", \"OtherPortal\", Message contains \"not allowed\", \"NotAllowed\", Message contains \"not found\", \"UserNotFound\", \"Other\")\n| project TimeGenerated, RawData, Computer, FilePath, TimeStamp, Severity, EventType, Subject, Reason, Message",
+            "outputStream": "[concat('Custom-', parameters('authTableName'), '_CL')]"
           }
         ]
       }

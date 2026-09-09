@@ -2,7 +2,7 @@
 #
 # Sets up monitoring data collection for an EspoCRM VM:
 #   1. a system-assigned managed identity on the VM (what the agent authenticates with)
-#   2. a custom table <table-name>_CL in the Log Analytics workspace
+#   2. custom tables <table-name>_CL and <auth-table-name>_CL in the Log Analytics workspace
 #   3. the Azure Monitor Agent, two Data Collection Rules and their associations,
 #      deployed from espocrm-monitoring.json next to this script
 #
@@ -28,6 +28,7 @@
 set -euo pipefail
 
 TABLE_NAME='espocrmlogs'
+AUTH_TABLE_NAME='espocrmauthlogs'
 RETENTION_DAYS=30
 DEPLOYMENT_NAME='espocrm-monitoring'
 TEMPLATE_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/espocrm-monitoring.json"
@@ -43,7 +44,8 @@ Usage: ./new-dcr-and-table.sh \
          --resource-group <resource-group> \
          --workspace <log-analytics-workspace-name> \
          --vm <vm-name> \
-         [--table-name espocrmlogs] [--retention-days 30] [--template <path>]
+         [--table-name espocrmlogs] [--auth-table-name espocrmauthlogs] \
+         [--retention-days 30] [--template <path>]
 
 The workspace and the VM must both be in --resource-group: the rule associations are
 deployed at resource-group scope.
@@ -61,6 +63,7 @@ while [[ $# -gt 0 ]]; do
         --workspace)       WORKSPACE_NAME="$2";  shift 2 ;;
         --vm)              VM_NAME="$2";         shift 2 ;;
         --table-name)      TABLE_NAME="$2";      shift 2 ;;
+        --auth-table-name) AUTH_TABLE_NAME="$2"; shift 2 ;;
         --retention-days)  RETENTION_DAYS="$2";  shift 2 ;;
         --template)        TEMPLATE_FILE="$2";   shift 2 ;;
         -h|--help)         usage; exit 0 ;;
@@ -91,10 +94,10 @@ az vm identity assign \
     --name "$VM_NAME" \
     --output none
 
-echo "==> Creating table ${TABLE_NAME}_CL in $WORKSPACE_NAME"
-# The first four columns are what the agent delivers; the rest are produced by the
-# transformation in the template, so the two have to stay in sync - same names, same
-# casing. TimeGenerated is mandatory.
+echo "==> Creating tables ${TABLE_NAME}_CL and ${AUTH_TABLE_NAME}_CL in $WORKSPACE_NAME"
+# The first four columns of each table are what the agent delivers; the rest are produced
+# by the transformations in the template, so the two have to stay in sync - same names,
+# same casing. TimeGenerated is mandatory.
 # Not named COLUMNS: bash overwrites that one with the terminal width.
 TABLE_COLUMNS=(
     TimeGenerated=datetime
@@ -106,26 +109,47 @@ TABLE_COLUMNS=(
     ErrorCode=int
     Message=string
 )
-if az monitor log-analytics workspace table show \
-        --resource-group "$RESOURCE_GROUP" \
-        --workspace-name "$WORKSPACE_NAME" \
-        --name "${TABLE_NAME}_CL" \
-        --output none 2>/dev/null; then
-    echo "    table exists, updating"
-    TABLE_VERB=update
-else
-    TABLE_VERB=create
-fi
+AUTH_TABLE_COLUMNS=(
+    TimeGenerated=datetime
+    RawData=string
+    Computer=string
+    FilePath=string
+    TimeStamp=datetime
+    Severity=string
+    EventType=string
+    Subject=string
+    Reason=string
+    Message=string
+)
+
 # A table can gain columns but cannot lose or retype them; undoing a wrong type means
 # deleting the table and losing what is in it.
-az monitor log-analytics workspace table "$TABLE_VERB" \
-    --resource-group "$RESOURCE_GROUP" \
-    --workspace-name "$WORKSPACE_NAME" \
-    --name "${TABLE_NAME}_CL" \
-    --retention-time "$RETENTION_DAYS" \
-    --total-retention-time "$RETENTION_DAYS" \
-    --columns "${TABLE_COLUMNS[@]}" \
-    --output none
+ensure_table() {
+    local name="$1"
+    shift
+
+    local verb=create
+    if az monitor log-analytics workspace table show \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME" \
+            --name "$name" \
+            --output none 2>/dev/null; then
+        echo "    $name exists, updating"
+        verb=update
+    fi
+
+    az monitor log-analytics workspace table "$verb" \
+        --resource-group "$RESOURCE_GROUP" \
+        --workspace-name "$WORKSPACE_NAME" \
+        --name "$name" \
+        --retention-time "$RETENTION_DAYS" \
+        --total-retention-time "$RETENTION_DAYS" \
+        --columns "$@" \
+        --output none
+}
+
+ensure_table "${TABLE_NAME}_CL" "${TABLE_COLUMNS[@]}"
+ensure_table "${AUTH_TABLE_NAME}_CL" "${AUTH_TABLE_COLUMNS[@]}"
 
 echo "==> Deploying the agent, the data collection rules and their associations"
 echo "    (this waits for the agent to install, so it takes a few minutes)"
@@ -137,6 +161,7 @@ az deployment group create \
         vmName="$VM_NAME" \
         workspaceName="$WORKSPACE_NAME" \
         tableName="$TABLE_NAME" \
+        authTableName="$AUTH_TABLE_NAME" \
     --query 'properties.provisioningState' \
     --output tsv
 
@@ -154,6 +179,12 @@ Log Analytics workspace > Logs:
     | order by TimeGenerated desc
     | take 20
 
+    ${AUTH_TABLE_NAME}_CL
+    | project TimeGenerated, EventType, Subject, Reason, Message
+    | order by TimeGenerated desc
+    | take 20
+
 Only lines written after the rules were associated are collected - the agent never
 backfills - so trigger something that logs rather than waiting for yesterday's errors.
+A failed password recovery from the login page is the quickest way to fill both tables.
 EOF
