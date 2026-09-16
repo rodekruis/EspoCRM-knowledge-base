@@ -19,11 +19,15 @@
 #
 # Before running, check the log files are readable by the agent's unprivileged user.
 # On the VM:
-#     sudo find /var/www/espocrm -type d -path '*/data/logs'
+#     sudo find /var/www/espocrm -type d -name logs -path '*/data/*'
 #     namei -l <that directory>/espo-$(date +%F).log
+#     ls -la <that directory>
 # Every directory needs o+x, the log directory itself o+rx (the agent lists it to resolve
 # the wildcard), and the files o+r. If not, nothing will ever be ingested and Azure will
 # not tell you why.
+#
+# If the log directory is somewhere the template's defaults do not reach, pass
+# --log-pattern (repeatable) rather than editing espocrm-monitoring.json.
 
 set -euo pipefail
 
@@ -36,6 +40,7 @@ SUBSCRIPTION_ID=''
 RESOURCE_GROUP=''
 WORKSPACE_NAME=''
 VM_NAME=''
+LOG_PATTERNS=()
 
 usage() {
     cat <<'EOF'
@@ -45,14 +50,20 @@ Usage: ./new-dcr-and-table.sh \
          --workspace <log-analytics-workspace-name> \
          --vm <vm-name> \
          [--table-name espocrmlogs] [--auth-table-name espocrmauthlogs] \
-         [--retention-days 30] [--template <path>]
+         [--retention-days 30] [--template <path>] \
+         [--log-pattern '/var/www/espocrm/*/data/logs/espo-*.log']
 
 The workspace and the VM must both be in --resource-group: the rule associations are
 deployed at resource-group scope.
 
-Anything else the template exposes - the log file patterns, the disk counters, the rule
-names, the agent version - can be overridden by editing espocrm-monitoring.json or by
-passing extra --parameters to the az deployment command at the bottom of this script.
+--log-pattern replaces the template's default log file patterns; repeat it to collect
+from more than one location. Quote it, or the shell expands the glob before az sees it.
+The defaults already cover the containerised layouts and bare installs under
+/var/www/espocrm/<version>/, so this is only for installs somewhere else entirely.
+
+Anything else the template exposes - the disk counters, the rule names, the agent
+version - can be overridden by editing espocrm-monitoring.json or by passing extra
+--parameters to the az deployment command at the bottom of this script.
 EOF
 }
 
@@ -66,6 +77,7 @@ while [[ $# -gt 0 ]]; do
         --auth-table-name) AUTH_TABLE_NAME="$2"; shift 2 ;;
         --retention-days)  RETENTION_DAYS="$2";  shift 2 ;;
         --template)        TEMPLATE_FILE="$2";   shift 2 ;;
+        --log-pattern)     LOG_PATTERNS+=("$2"); shift 2 ;;
         -h|--help)         usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -151,17 +163,32 @@ ensure_table() {
 ensure_table "${TABLE_NAME}_CL" "${TABLE_COLUMNS[@]}"
 ensure_table "${AUTH_TABLE_NAME}_CL" "${AUTH_TABLE_COLUMNS[@]}"
 
+DEPLOY_PARAMETERS=(
+    vmName="$VM_NAME"
+    workspaceName="$WORKSPACE_NAME"
+    tableName="$TABLE_NAME"
+    authTableName="$AUTH_TABLE_NAME"
+)
+
+if [[ ${#LOG_PATTERNS[@]} -gt 0 ]]; then
+    # az takes array parameters as a JSON string, so build one rather than passing the
+    # elements separately - repeated KEY=VALUE pairs would keep only the last.
+    patterns_json='['
+    for pattern in "${LOG_PATTERNS[@]}"; do
+        patterns_json+="\"${pattern//\"/\\\"}\","
+    done
+    patterns_json="${patterns_json%,}]"
+    DEPLOY_PARAMETERS+=(logFilePatterns="$patterns_json")
+    echo "==> Collecting logs from: ${LOG_PATTERNS[*]}"
+fi
+
 echo "==> Deploying the agent, the data collection rules and their associations"
 echo "    (this waits for the agent to install, so it takes a few minutes)"
 az deployment group create \
     --resource-group "$RESOURCE_GROUP" \
     --name "$DEPLOYMENT_NAME" \
     --template-file "$TEMPLATE_FILE" \
-    --parameters \
-        vmName="$VM_NAME" \
-        workspaceName="$WORKSPACE_NAME" \
-        tableName="$TABLE_NAME" \
-        authTableName="$AUTH_TABLE_NAME" \
+    --parameters "${DEPLOY_PARAMETERS[@]}" \
     --query 'properties.provisioningState' \
     --output tsv
 

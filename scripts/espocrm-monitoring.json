@@ -39,10 +39,11 @@
       "type": "array",
       "defaultValue": [
         "/var/www/espocrm/data/espocrm/data/logs/espo-*.log",
-        "/var/www/espocrm/data/espocrm/persistent/data/logs/espo-*.log"
+        "/var/www/espocrm/data/espocrm/persistent/data/logs/espo-*.log",
+        "/var/www/espocrm/*/data/logs/espo-*.log"
       ],
       "metadata": {
-        "description": "Both known install layouts; a pattern matching nothing is ignored."
+        "description": "The known install layouts; a pattern matching nothing is ignored. The third covers bare installs under a version-named directory (EspoCRM-9.3.4), so an upgrade does not need a redeploy. The wildcard never spans a slash, so the three cannot match the same file twice."
       }
     },
     "diskCounterSpecifiers": {
