@@ -1,5 +1,0 @@
-{
-    "azureMonitorLogsTest": {
-        "className": "Espo\\Modules\\AzureMonitorLogs\\Console\\TestCommand"
-    }
-}
