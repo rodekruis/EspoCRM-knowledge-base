@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh EspoCRM infrastructure images (nginx, MariaDB, certbot) within their pinned release lines
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/espocrm-image-refresh
+TimeoutStartSec=45min

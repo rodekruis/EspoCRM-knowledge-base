@@ -132,6 +132,7 @@ It should report that the installation is already upgraded. If it reports a vers
   - The MariaDB line must not be end-of-life.
   - If any of these fails, move that infrastructure image to a current build within (or onto) a supported release line, recreate only that service (`docker compose up -d --no-deps <service>`), and run this phase again.
   - Tell the user that scanners like Orca key alerts to the container: **recreating a container can reopen alerts that already existed** and make them look new. Compare CVE IDs and image digests against the baseline, not alert counts.
+- [ ] **The instance stays patched after you leave.** An upgrade only fixes vulnerabilities once; between upgrades, the nginx, MariaDB and certbot images are kept current by the weekly `espocrm-image-refresh` timer (wiki: *Security > Container image updates*). Check it with `systemctl list-timers espocrm-image-refresh.timer`. If it's missing, offer to install it and enable it once nginx and MariaDB are pinned to release lines. It skips itself while maintenance mode is on or cron is disabled, so it never interferes with an upgrade. Also check that the VM's OS patching and `apt-autoremove.timer` (same wiki page) are in place, and report any gap to the user.
 - [ ] No *new* `ERROR|CRITICAL` in `sudo docker logs espocrm --tail 100` or in `data/espocrm/data/logs/` since the upgrade timestamp (watch especially for DB/migration errors when the DB is external).
 - [ ] `SELECT COUNT(*) FROM job WHERE status='Failed' AND modified_at > <upgrade_ts>` = 0.
 
