@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly refresh of EspoCRM infrastructure images
+
+[Timer]
+OnCalendar=Sun *-*-* 05:00:00 UTC
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

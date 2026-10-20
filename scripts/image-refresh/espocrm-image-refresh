@@ -1,0 +1,243 @@
+#!/usr/bin/env bash
+# espocrm-image-refresh: keep the infrastructure containers of a dockerised EspoCRM
+# (espocrm-installer layout) on current, patched images within their pinned release lines.
+#
+# - Pulls ONLY nginx, MariaDB and certbot. Never touches the EspoCRM app image: with the
+#   floating `espocrm/espocrm:fpm` tag that would be an unattended EspoCRM upgrade.
+# - Recreates a container only when its image changed, then health-checks the site.
+# - nginx: rolls back to the previous image automatically if the health check fails.
+# - MariaDB: takes and verifies a dump first; after the switch it waits for
+#   MARIADB_AUTO_UPGRADE, checks the application tables, then health-checks.
+#   No automatic downgrade (MariaDB doesn't support it) — it fails loudly and keeps the dump.
+# - Skips the whole run while maintenance mode is on or cron is disabled (an upgrade is in progress).
+# - Refuses to run unless nginx and MariaDB are pinned to release lines (e.g. nginx:stable,
+#   mariadb:11.8) and MARIADB_AUTO_UPGRADE is "1", so a weekly pull can't jump a major version.
+#
+# Source: https://github.com/rodekruis/EspoCRM-knowledge-base/tree/main/scripts/image-refresh
+# Docs:   https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#container-image-updates
+#
+# Usage: espocrm-image-refresh [--force nginx|db] [--test-rollback]
+#   --force nginx|db   recreate that service even if its image is unchanged (for testing)
+#   --test-rollback    with --force nginx: treat the health check as failed to exercise the rollback
+set -euo pipefail
+
+ESPO_HOME=/var/www/espocrm
+COMPOSE="$ESPO_HOME/docker-compose.yml"
+CONFIG="$ESPO_HOME/data/espocrm/data/config.php"
+DUMP_DIR=/var/backups/espocrm-db
+DUMP_KEEP=4
+MIN_FREE_KB=$((2 * 1024 * 1024))   # 2 GB free required before a database switch
+
+FORCE=""
+TEST_ROLLBACK=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) FORCE="$2"; shift 2 ;;
+    --test-rollback) TEST_ROLLBACK=1; shift ;;
+    *) echo "unknown option: $1" >&2; exit 2 ;;
+  esac
+done
+
+log() { echo "[espocrm-image-refresh] $*"; }
+dc() { docker compose -f "$COMPOSE" "$@"; }
+
+exec 9>/run/lock/espocrm-image-refresh.lock
+flock -n 9 || { log "another run is in progress, exiting"; exit 0; }
+
+if grep -qE "'maintenanceMode' => true" "$CONFIG" || grep -qE "'cronDisabled' => true" "$CONFIG"; then
+  log "maintenance mode is on or cron is disabled (upgrade in progress?) - skipping this run"
+  exit 0
+fi
+
+image_of_service() {   # the image tag configured in the compose file
+  dc config --format json 2>/dev/null | python3 -c \
+    "import sys,json; print(json.load(sys.stdin)['services']['$1']['image'])"
+}
+running_image_id() { docker inspect "$1" --format '{{.Image}}'; }
+local_image_id() { docker image inspect "$1" --format '{{.Id}}'; }
+
+site_host() {
+  docker inspect espocrm-nginx --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | sed -n 's/^NGINX_HOST=//p'
+}
+
+check_pins() {   # a weekly pull is only safe when the tags can't jump a major version
+  local nginx_tag db_tag auto
+  nginx_tag=$(image_of_service espocrm-nginx)
+  db_tag=$(image_of_service espocrm-db)
+  case "$nginx_tag" in
+    nginx|nginx:latest|nginx:mainline*)
+      log "REFUSING: espocrm-nginx uses '$nginx_tag'; pin it to a release line such as nginx:stable first"
+      return 1 ;;
+  esac
+  if ! [[ "$db_tag" =~ ^mariadb:[0-9]+\.[0-9]+$ ]]; then
+    log "REFUSING: espocrm-db uses '$db_tag'; pin it to a supported major.minor line such as mariadb:11.8 first"
+    return 1
+  fi
+  auto=$(dc config --format json 2>/dev/null | python3 -c \
+    "import sys,json; print(json.load(sys.stdin)['services']['espocrm-db'].get('environment',{}).get('MARIADB_AUTO_UPGRADE',''))")
+  if [ "$auto" != 1 ]; then
+    log "REFUSING: espocrm-db has no MARIADB_AUTO_UPGRADE: \"1\"; without it a patch update skips mariadb-upgrade"
+    return 1
+  fi
+}
+
+health_once() {
+  local host base resolve code path
+  host=$(site_host)
+  base="https://$host"
+  resolve="$host:443:127.0.0.1"
+  for path in api/v1/Settings api/v1/I18n; do
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$resolve" "$base/$path" || true)
+    [ "$code" = 200 ] || { log "health: /$path -> $code"; return 1; }
+  done
+  # every front-end file the login page loads must be served
+  local assets
+  assets=$(curl -sk --max-time 20 --resolve "$resolve" "$base/" \
+    | grep -oE '(src|href)="client/[^"]+"' | sed -E 's/^(src|href)="//; s/"$//' || true)
+  [ -n "$assets" ] || { log "health: no client assets found on the index page"; return 1; }
+  while read -r path; do
+    code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$resolve" "$base/$path" || true)
+    [ "$code" = 200 ] || { log "health: /$path -> $code"; return 1; }
+  done <<< "$assets"
+  # app-check exists from EspoCRM v10 onwards
+  if docker exec espocrm sh -c 'test -x bin/command' 2>/dev/null; then
+    docker exec espocrm bin/command app-check >/dev/null 2>&1 || { log "health: app-check failed"; return 1; }
+  fi
+  return 0
+}
+
+wait_healthy() {   # up to ~3 minutes
+  local i
+  for i in $(seq 1 18); do
+    health_once && return 0
+    sleep 10
+  done
+  return 1
+}
+
+refresh_nginx() {
+  local tag old new
+  tag=$(image_of_service espocrm-nginx)
+  old=$(running_image_id espocrm-nginx)
+  new=$(local_image_id "$tag")
+  if [ "$old" = "$new" ] && [ "$FORCE" != nginx ]; then
+    log "nginx: $tag unchanged"
+    return 0
+  fi
+  log "nginx: recreating on $tag (${old:7:12} -> ${new:7:12})"
+  dc up -d --no-deps --force-recreate espocrm-nginx
+  if [ "$TEST_ROLLBACK" = 1 ] || ! wait_healthy; then
+    [ "$TEST_ROLLBACK" = 1 ] && log "nginx: --test-rollback set, simulating a failed health check"
+    log "nginx: health check FAILED - rolling back to ${old:7:12}"
+    docker tag "$old" "$tag"
+    dc up -d --no-deps --force-recreate espocrm-nginx
+    if wait_healthy; then
+      log "nginx: rollback healthy. The new image is not in use; the next run will try again"
+    else
+      log "nginx: rollback ALSO unhealthy - manual action needed"
+    fi
+    return 1
+  fi
+  log "nginx: healthy on $(docker exec espocrm-nginx nginx -v 2>&1 | sed 's/.*nginx\///')"
+  remove_replaced "$old" "$new"
+}
+
+dump_db() {
+  local free f
+  free=$(df -k --output=avail "$ESPO_HOME" | tail -n1)
+  if [ "$free" -lt "$MIN_FREE_KB" ]; then
+    log "db: only $((free / 1024)) MB free, need $((MIN_FREE_KB / 1024)) MB - not switching the database"
+    return 1
+  fi
+  mkdir -p "$DUMP_DIR"
+  chmod 700 "$DUMP_DIR"
+  f="$DUMP_DIR/espocrm-$(date +%Y%m%d-%H%M%S).sql"
+  if ! docker exec espocrm-db sh -c \
+      'mariadb-dump --single-transaction --routines --triggers -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
+      > "$f"; then
+    log "db: dump FAILED (non-zero exit) - not switching the database"
+    rm -f "$f"
+    return 1
+  fi
+  if [[ "$(tail -n 1 "$f")" != "-- Dump completed"* ]]; then
+    log "db: dump is INCOMPLETE (no '-- Dump completed') - not switching the database"
+    rm -f "$f"
+    return 1
+  fi
+  gzip "$f"
+  log "db: verified dump $f.gz ($(du -h "$f.gz" | cut -f1))"
+  ls -1t "$DUMP_DIR"/espocrm-*.sql.gz | tail -n +$((DUMP_KEEP + 1)) | xargs -r rm -f
+}
+
+db_upgraded() {
+  local out
+  out=$(docker exec espocrm-db sh -c \
+    'mariadb-upgrade --check-if-upgrade-is-needed -u root -p"$MARIADB_ROOT_PASSWORD"' 2>/dev/null || true)
+  [[ "$out" == *"no need to run mariadb-upgrade"* ]]
+}
+
+refresh_db() {
+  local tag old new i bad since logs need
+  tag=$(image_of_service espocrm-db)
+  old=$(running_image_id espocrm-db)
+  new=$(local_image_id "$tag")
+  if [ "$old" = "$new" ] && [ "$FORCE" != db ]; then
+    log "db: $tag unchanged"
+    return 0
+  fi
+  log "db: new image for $tag (${old:7:12} -> ${new:7:12})"
+  dump_db || return 1
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  dc up -d --no-deps --force-recreate espocrm-db
+  # On a version change the entrypoint runs a temporary server for mariadb-upgrade, stops it,
+  # then starts the real server. Wait for the real one: one "ready" line, or two if a temporary
+  # server was used and has stopped. Up to 5 minutes.
+  for i in $(seq 1 30); do
+    sleep 10
+    logs=$(docker logs espocrm-db --since "$since" 2>&1 || true)
+    need=1
+    if [[ "$logs" == *"Temporary server started"* ]]; then
+      [[ "$logs" == *"Temporary server stopped"* ]] || continue
+      need=2
+    fi
+    [ "$(grep -c 'ready for connections' <<< "$logs" || true)" -ge "$need" ] || continue
+    db_upgraded && break
+  done
+  if ! db_upgraded; then
+    log "db: server not ready or mariadb-upgrade incomplete after 5 minutes - manual action needed (dump in $DUMP_DIR)"
+    return 1
+  fi
+  bad=$(docker exec espocrm-db sh -c \
+    'mariadb-check --check-upgrade --databases "$MARIADB_DATABASE" -u root -p"$MARIADB_ROOT_PASSWORD"' 2>&1 \
+    | grep -vcE '^[^ ]+ +OK$' || true)
+  if [ "$bad" != 0 ]; then
+    log "db: mariadb-check reported $bad non-OK lines - manual action needed (dump in $DUMP_DIR)"
+    return 1
+  fi
+  log "db: $(docker exec espocrm-db mariadbd --version | awk '{print $3}'), all application tables OK"
+  if ! wait_healthy; then
+    log "db: site health check FAILED after the database switch - manual action needed (dump in $DUMP_DIR)"
+    return 1
+  fi
+  log "db: site healthy"
+  remove_replaced "$old" "$new"
+}
+
+remove_replaced() {   # delete only the image this run replaced; keep every other image (rollbacks)
+  [ "$1" != "$2" ] && docker image rm "$1" >/dev/null 2>&1 && log "removed replaced image ${1:7:12}"
+  return 0
+}
+
+log "start"
+check_pins || exit 1
+dc pull --quiet espocrm-nginx espocrm-db espocrm-certbot
+status=0
+refresh_nginx || status=1
+refresh_db || status=1
+if [ "$status" = 0 ]; then
+  log "done: all healthy"
+else
+  log "done: FAILURES above"
+fi
+exit "$status"
