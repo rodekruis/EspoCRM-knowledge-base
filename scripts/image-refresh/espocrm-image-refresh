@@ -2,16 +2,20 @@
 # espocrm-image-refresh: keep the infrastructure containers of a dockerised EspoCRM
 # (espocrm-installer layout) on current, patched images within their pinned release lines.
 #
-# - Pulls ONLY nginx, MariaDB and certbot. Never touches the EspoCRM app image: with the
-#   floating `espocrm/espocrm:fpm` tag that would be an unattended EspoCRM upgrade.
+# - Pulls ONLY nginx, the database (MariaDB or MySQL) and certbot. Never touches the EspoCRM app
+#   image: with the floating `espocrm/espocrm:fpm` tag that would be an unattended EspoCRM upgrade.
 # - Recreates a container only when its image changed, then health-checks the site.
 # - nginx: rolls back to the previous image automatically if the health check fails.
-# - MariaDB: takes and verifies a dump first; after the switch it waits for
-#   MARIADB_AUTO_UPGRADE, checks the application tables, then health-checks.
-#   No automatic downgrade (MariaDB doesn't support it) — it fails loudly and keeps the dump.
+# - Database: takes and verifies a dump first; after the switch it waits for the engine's own
+#   upgrade step, checks the application tables, then health-checks. No automatic downgrade
+#   (neither engine supports it reliably) — it fails loudly and keeps the dump.
+#     MariaDB (service espocrm-db):    MARIADB_AUTO_UPGRADE runs mariadb-upgrade; checked with mariadb-check.
+#     MySQL   (service espocrm-mysql): mysqld upgrades itself at startup (MySQL >= 8.0.16); checked with
+#                                      CHECK TABLE ... FOR UPGRADE, since the 8.4+ image has no mysqlcheck.
 # - Skips the whole run while maintenance mode is on or cron is disabled (an upgrade is in progress).
-# - Refuses to run unless nginx and MariaDB are pinned to release lines (e.g. nginx:stable,
-#   mariadb:11.8) and MARIADB_AUTO_UPGRADE is "1", so a weekly pull can't jump a major version.
+# - Refuses to run unless nginx and the database are pinned to release lines (e.g. nginx:stable,
+#   mariadb:11.8, mysql:8.4), MariaDB has MARIADB_AUTO_UPGRADE "1" and MySQL's automatic upgrade
+#   isn't switched off, so a weekly pull can't jump a major version or skip the upgrade step.
 #
 # Source: https://github.com/rodekruis/EspoCRM-knowledge-base/tree/main/scripts/image-refresh
 # Docs:   https://github.com/rodekruis/EspoCRM-knowledge-base/wiki/Security#container-image-updates
@@ -26,7 +30,7 @@ COMPOSE="$ESPO_HOME/docker-compose.yml"
 CONFIG="$ESPO_HOME/data/espocrm/data/config.php"
 DUMP_DIR=/var/backups/espocrm-db
 DUMP_KEEP=4
-MIN_FREE_KB=$((2 * 1024 * 1024))   # 2 GB free required before a database switch
+MIN_FREE_KB=$((2 * 1024 * 1024))   # 2 GB free required before a database switch, on top of the dump size
 
 FORCE=""
 TEST_ROLLBACK=0
@@ -49,42 +53,87 @@ if grep -qE "'maintenanceMode' => true" "$CONFIG" || grep -qE "'cronDisabled' =>
   exit 0
 fi
 
+COMPOSE_JSON=$(dc config --format json 2>/dev/null) || COMPOSE_JSON=""
+if [ -z "$COMPOSE_JSON" ]; then
+  log "REFUSING: could not read $COMPOSE with 'docker compose config'"
+  exit 1
+fi
+
+compose_get() {   # print a value from the resolved compose file; $1 is a Python expression on `s` (services)
+  python3 -c "import sys,json; s=json.load(sys.stdin)['services']; v=$1; print(' '.join(v) if isinstance(v,list) else v)" \
+    <<< "$COMPOSE_JSON"
+}
 image_of_service() {   # the image tag configured in the compose file
-  dc config --format json 2>/dev/null | python3 -c \
-    "import sys,json; print(json.load(sys.stdin)['services']['$1']['image'])"
+  compose_get "s['$1']['image']"
+}
+
+# The database service differs by install: espocrm-db (MariaDB) or espocrm-mysql (older installs, MySQL).
+# Its container_name equals the service name in the espocrm-installer layout.
+DB_SVC=$(compose_get "next((n for n in ('espocrm-db', 'espocrm-mysql') if n in s), '')")
+if [ -z "$DB_SVC" ]; then
+  log "REFUSING: no espocrm-db or espocrm-mysql service in $COMPOSE"
+  exit 1
+fi
+case "$(image_of_service "$DB_SVC")" in
+  mariadb*) DB_KIND=mariadb ;;
+  mysql*)   DB_KIND=mysql ;;
+  *) log "REFUSING: $DB_SVC uses '$(image_of_service "$DB_SVC")', which is neither mariadb nor mysql"; exit 1 ;;
+esac
+
+db_sql() {   # run SQL from stdin against the application database; tab-separated, no headers
+  if [ "$DB_KIND" = mariadb ]; then
+    docker exec -i "$DB_SVC" sh -c 'mariadb -N -B -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"'
+  else
+    docker exec -i "$DB_SVC" sh -c 'mysql -N -B -u root -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" 2>&1' \
+      | grep -v 'Using a password on the command line'
+  fi
 }
 running_image_id() { docker inspect "$1" --format '{{.Image}}'; }
 local_image_id() { docker image inspect "$1" --format '{{.Id}}'; }
 
-site_host() {
-  docker inspect espocrm-nginx --format '{{range .Config.Env}}{{println .}}{{end}}' \
-    | sed -n 's/^NGINX_HOST=//p'
+site_host() {   # NGINX_HOST on newer installs; older installs only have ESPOCRM_SITE_URL on the app service
+  local host
+  host=$(docker inspect espocrm-nginx --format '{{range .Config.Env}}{{println .}}{{end}}' \
+    | sed -n 's/^NGINX_HOST=//p')
+  if [ -z "$host" ]; then
+    host=$(compose_get "s['espocrm'].get('environment',{}).get('ESPOCRM_SITE_URL','')" \
+      | sed -E 's#^[a-z]+://##; s#[/:].*$##')
+  fi
+  echo "$host"
 }
 
 check_pins() {   # a weekly pull is only safe when the tags can't jump a major version
-  local nginx_tag db_tag auto
+  local nginx_tag db_tag auto cmd
   nginx_tag=$(image_of_service espocrm-nginx)
-  db_tag=$(image_of_service espocrm-db)
+  db_tag=$(image_of_service "$DB_SVC")
   case "$nginx_tag" in
     nginx|nginx:latest|nginx:mainline*)
       log "REFUSING: espocrm-nginx uses '$nginx_tag'; pin it to a release line such as nginx:stable first"
       return 1 ;;
   esac
-  if ! [[ "$db_tag" =~ ^mariadb:[0-9]+\.[0-9]+$ ]]; then
-    log "REFUSING: espocrm-db uses '$db_tag'; pin it to a supported major.minor line such as mariadb:11.8 first"
+  if ! [[ "$db_tag" =~ ^$DB_KIND:[0-9]+\.[0-9]+$ ]]; then
+    log "REFUSING: $DB_SVC uses '$db_tag'; pin it to a supported major.minor line such as mariadb:11.8 or mysql:8.4 first"
     return 1
   fi
-  auto=$(dc config --format json 2>/dev/null | python3 -c \
-    "import sys,json; print(json.load(sys.stdin)['services']['espocrm-db'].get('environment',{}).get('MARIADB_AUTO_UPGRADE',''))")
-  if [ "$auto" != 1 ]; then
-    log "REFUSING: espocrm-db has no MARIADB_AUTO_UPGRADE: \"1\"; without it a patch update skips mariadb-upgrade"
-    return 1
+  if [ "$DB_KIND" = mariadb ]; then
+    auto=$(compose_get "s['espocrm-db'].get('environment',{}).get('MARIADB_AUTO_UPGRADE','')")
+    if [ "$auto" != 1 ]; then
+      log "REFUSING: espocrm-db has no MARIADB_AUTO_UPGRADE: \"1\"; without it a patch update skips mariadb-upgrade"
+      return 1
+    fi
+  else
+    cmd=$(compose_get "s['$DB_SVC'].get('command') or ''")
+    if grep -qiE -- '--upgrade[=[:space:]]+(none|minimal)' <<< "$cmd"; then
+      log "REFUSING: $DB_SVC runs mysqld with '--upgrade=NONE/MINIMAL'; a patch update would skip the server upgrade"
+      return 1
+    fi
   fi
 }
 
 health_once() {
   local host base resolve code path
   host=$(site_host)
+  [ -n "$host" ] || { log "health: site host unknown (no NGINX_HOST or ESPOCRM_SITE_URL)"; return 1; }
   base="https://$host"
   resolve="$host:443:127.0.0.1"
   for path in api/v1/Settings api/v1/I18n; do
@@ -144,18 +193,27 @@ refresh_nginx() {
 }
 
 dump_db() {
-  local free f
-  free=$(df -k --output=avail "$ESPO_HOME" | tail -n1)
-  if [ "$free" -lt "$MIN_FREE_KB" ]; then
-    log "db: only $((free / 1024)) MB free, need $((MIN_FREE_KB / 1024)) MB - not switching the database"
+  local free need db_kb f dump_cmd
+  free=$(df -k --output=avail "$DUMP_DIR" 2>/dev/null || df -k --output=avail /var/backups)
+  free=$(tail -n1 <<< "$free")
+  # the uncompressed dump is roughly the size of the data, and is written before gzip
+  db_kb=$(db_sql <<< "SELECT COALESCE(ROUND(SUM(data_length + index_length) / 1024), 0)
+                      FROM information_schema.tables WHERE table_schema = DATABASE();" | tail -n1)
+  [[ "$db_kb" =~ ^[0-9]+$ ]] || { log "db: could not read the database size - not switching the database"; return 1; }
+  need=$((MIN_FREE_KB + db_kb))
+  if [ "$free" -lt "$need" ]; then
+    log "db: only $((free / 1024)) MB free, need $((need / 1024)) MB - not switching the database"
     return 1
   fi
   mkdir -p "$DUMP_DIR"
   chmod 700 "$DUMP_DIR"
   f="$DUMP_DIR/espocrm-$(date +%Y%m%d-%H%M%S).sql"
-  if ! docker exec espocrm-db sh -c \
-      'mariadb-dump --single-transaction --routines --triggers -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"' \
-      > "$f"; then
+  if [ "$DB_KIND" = mariadb ]; then
+    dump_cmd='mariadb-dump --single-transaction --routines --triggers -u root -p"$MARIADB_ROOT_PASSWORD" "$MARIADB_DATABASE"'
+  else
+    dump_cmd='mysqldump --single-transaction --routines --triggers -u root -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE"'
+  fi
+  if ! docker exec "$DB_SVC" sh -c "$dump_cmd" > "$f"; then
     log "db: dump FAILED (non-zero exit) - not switching the database"
     rm -f "$f"
     return 1
@@ -177,25 +235,14 @@ db_upgraded() {
   [[ "$out" == *"no need to run mariadb-upgrade"* ]]
 }
 
-refresh_db() {
-  local tag old new i bad since logs need
-  tag=$(image_of_service espocrm-db)
-  old=$(running_image_id espocrm-db)
-  new=$(local_image_id "$tag")
-  if [ "$old" = "$new" ] && [ "$FORCE" != db ]; then
-    log "db: $tag unchanged"
-    return 0
-  fi
-  log "db: new image for $tag (${old:7:12} -> ${new:7:12})"
-  dump_db || return 1
-  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  dc up -d --no-deps --force-recreate espocrm-db
+wait_mariadb() {   # up to 5 minutes
+  local i logs need
   # On a version change the entrypoint runs a temporary server for mariadb-upgrade, stops it,
   # then starts the real server. Wait for the real one: one "ready" line, or two if a temporary
-  # server was used and has stopped. Up to 5 minutes.
+  # server was used and has stopped.
   for i in $(seq 1 30); do
     sleep 10
-    logs=$(docker logs espocrm-db --since "$since" 2>&1 || true)
+    logs=$(docker logs espocrm-db --since "$1" 2>&1 || true)
     need=1
     if [[ "$logs" == *"Temporary server started"* ]]; then
       [[ "$logs" == *"Temporary server stopped"* ]] || continue
@@ -208,14 +255,85 @@ refresh_db() {
     log "db: server not ready or mariadb-upgrade incomplete after 5 minutes - manual action needed (dump in $DUMP_DIR)"
     return 1
   fi
-  bad=$(docker exec espocrm-db sh -c \
-    'mariadb-check --check-upgrade --databases "$MARIADB_DATABASE" -u root -p"$MARIADB_ROOT_PASSWORD"' 2>&1 \
-    | grep -vcE '^[^ ]+ +OK$' || true)
-  if [ "$bad" != 0 ]; then
-    log "db: mariadb-check reported $bad non-OK lines - manual action needed (dump in $DUMP_DIR)"
+}
+
+wait_mysql() {   # up to 5 minutes
+  local i logs ready=0
+  # mysqld upgrades the data dictionary and system tables itself during startup, logging
+  # "Server upgrade from 'X' to 'Y' started/completed", and only then reports the real server
+  # ready on port 3306 (the X Plugin's own "ready" line is on port 33060).
+  for i in $(seq 1 30); do
+    sleep 10
+    logs=$(docker logs "$DB_SVC" --since "$1" 2>&1 || true)
+    if grep -qE "ready for connections\. Version: .* port: 3306" <<< "$logs"; then
+      ready=1
+      break
+    fi
+  done
+  if [ "$ready" != 1 ]; then
+    log "db: mysqld not ready after 5 minutes - manual action needed (dump in $DUMP_DIR)"
     return 1
   fi
-  log "db: $(docker exec espocrm-db mariadbd --version | awk '{print $3}'), all application tables OK"
+  if grep -q "Server upgrade from .* started" <<< "$logs" && ! grep -q "Server upgrade from .* completed" <<< "$logs"; then
+    log "db: mysqld started but its server upgrade did not complete - manual action needed (dump in $DUMP_DIR)"
+    return 1
+  fi
+  grep -oE "Server upgrade from '[0-9]+' to '[0-9]+' completed" <<< "$logs" | sed 's/^/db: /' | while read -r l; do log "$l"; done
+  return 0
+}
+
+check_tables() {   # read-only check that every application table is usable by the new server version
+  local out total bad
+  if [ "$DB_KIND" = mariadb ]; then
+    bad=$(docker exec espocrm-db sh -c \
+      'mariadb-check --check-upgrade --databases "$MARIADB_DATABASE" -u root -p"$MARIADB_ROOT_PASSWORD"' 2>&1 \
+      | grep -vcE '^[^ ]+ +OK$' || true)
+    if [ "$bad" != 0 ]; then
+      log "db: mariadb-check reported $bad non-OK lines - manual action needed (dump in $DUMP_DIR)"
+      return 1
+    fi
+    return 0
+  fi
+  # the MySQL 8.4+ image ships no mysqlcheck; CHECK TABLE ... FOR UPGRADE is the same check in SQL
+  out=$(db_sql <<'SQL' | db_sql || true
+SELECT CONCAT('CHECK TABLE `', table_name, '` FOR UPGRADE;') FROM information_schema.tables
+WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE';
+SQL
+)
+  total=$(grep -c . <<< "$out" || true)
+  # MySQL answers "OK", or "Table is already up to date" for a table this version has already checked
+  bad=$(awk -F'\t' '!($3 == "status" && ($4 == "OK" || $4 == "Table is already up to date"))' <<< "$out" \
+    | grep -c . || true)
+  if [ "$total" = 0 ] || [ "$bad" != 0 ]; then
+    log "db: CHECK TABLE FOR UPGRADE: $total checked, $bad not OK - manual action needed (dump in $DUMP_DIR)"
+    return 1
+  fi
+}
+
+refresh_db() {
+  local tag old new since
+  tag=$(image_of_service "$DB_SVC")
+  old=$(running_image_id "$DB_SVC")
+  new=$(local_image_id "$tag")
+  if [ "$old" = "$new" ] && [ "$FORCE" != db ]; then
+    log "db: $tag unchanged"
+    return 0
+  fi
+  log "db: new image for $tag (${old:7:12} -> ${new:7:12})"
+  dump_db || return 1
+  since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  dc up -d --no-deps --force-recreate "$DB_SVC"
+  if [ "$DB_KIND" = mariadb ]; then
+    wait_mariadb "$since" || return 1
+  else
+    wait_mysql "$since" || return 1
+  fi
+  check_tables || return 1
+  if [ "$DB_KIND" = mariadb ]; then
+    log "db: $(docker exec espocrm-db mariadbd --version | awk '{print $3}'), all application tables OK"
+  else
+    log "db: mysql $(docker exec "$DB_SVC" mysqld --version | awk '{print $3}'), all application tables OK"
+  fi
   if ! wait_healthy; then
     log "db: site health check FAILED after the database switch - manual action needed (dump in $DUMP_DIR)"
     return 1
@@ -231,7 +349,7 @@ remove_replaced() {   # delete only the image this run replaced; keep every othe
 
 log "start"
 check_pins || exit 1
-dc pull --quiet espocrm-nginx espocrm-db espocrm-certbot
+dc pull --quiet espocrm-nginx "$DB_SVC" espocrm-certbot
 status=0
 refresh_nginx || status=1
 refresh_db || status=1
