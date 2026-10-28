@@ -1,0 +1,23 @@
+name: Validate scripts
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bash-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check Bash syntax
+        shell: bash
+        run: |
+          bash -n "${GITHUB_WORKSPACE}/scripts/new-dcr-and-table.sh"
+          bash -n "${GITHUB_WORKSPACE}/scripts/image-refresh/espocrm-image-refresh"
